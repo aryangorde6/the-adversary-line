@@ -8,6 +8,7 @@ const SUITES = [
   require('./suite-idempotency'),
   require('./suite-availability'),
   require('./suite-booking'),
+  require('./suite-combinations'),
   require('./suite-moves'),
   require('./suite-transfer'),
   require('./suite-concurrency'),

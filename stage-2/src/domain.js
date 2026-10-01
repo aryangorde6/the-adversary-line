@@ -106,10 +106,6 @@ function tablesAreFree(restaurantId, tableIds, startMs, endMs, ignore) {
   return blockingTableId(restaurantId, tableIds, startMs, endMs, ignore) === null;
 }
 
-function tableIsFree(restaurantId, tableId, startMs, endMs, ignore) {
-  return tablesAreFree(restaurantId, [tableId], startMs, endMs, ignore);
-}
-
 /** Tables two results would share, or an empty array when they share none.
  * Set intersection, because two combinations can collide on any member without
  * their ids being equal anywhere. */
@@ -370,7 +366,6 @@ module.exports = {
   rangesForWeekday,
   slotLocalMinutes,
   overlaps,
-  tableIsFree,
   tablesAreFree,
   blockingTableId,
   reservedTableIds,
