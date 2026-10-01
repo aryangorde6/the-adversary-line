@@ -62,10 +62,10 @@ export default async function run() {
       const runCmd = runSeg.replace(/\btablekeeper\b/g, IMAGE)
         .replace(/\bdocker run\b/, `docker run -d --name ${runName}`)
         .replace(/--rm\b/, '')
-        .replace(/-p\s+\S+/, '-p 18081:8080');
+        .replace(/-p\s+\S+/, '-p 18077:8080');
       let started = true;
       try { sh(runCmd); } catch (error) { started = false; runError = String(error.stderr || error.message).slice(0, 200); }
-      if (started) runHealth = (await waitHealthy('http://127.0.0.1:18081')).status;
+      if (started) runHealth = (await waitHealthy('http://127.0.0.1:18077')).status;
       runOk = runHealth === 200;
     }
     record('D1', existsSync(RUN_MD) && /build/i.test(runMd) && /run/i.test(runMd) && buildOk && runOk,
