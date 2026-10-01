@@ -139,14 +139,8 @@ function normalizeTables(raw, label) {
     if (!Number.isInteger(obj.capacity) || obj.capacity < 1) {
       throw errors.validationFailed(`${label}.tables[].capacity must be a positive integer`);
     }
-    if (obj.label !== undefined && obj.label !== null) {
-      requireText(obj.label, `${label}.tables[].label must be a string`);
-    }
-    return {
-      id,
-      label: obj.label === undefined || obj.label === null ? id : String(obj.label),
-      capacity: obj.capacity,
-    };
+    requireText(obj.label, `${label}.tables[].label must be a string`);
+    return { id, label: obj.label, capacity: obj.capacity };
   });
 }
 
@@ -161,12 +155,10 @@ function normalizeRestaurants(raw) {
     seen.add(id);
     requireText(obj.timezone, `restaurant ${id} timezone must be a string`);
     if (!T.isValidZone(obj.timezone)) throw errors.validationFailed(`restaurant ${id} has an invalid timezone`);
-    if (obj.name !== undefined && obj.name !== null) {
-      requireText(obj.name, `restaurant ${id} name must be a string`);
-    }
+    requireText(obj.name, `restaurant ${id} name must be a string`);
     return {
       id,
-      name: obj.name === undefined || obj.name === null ? id : obj.name,
+      name: obj.name,
       timezone: obj.timezone,
       slot_minutes: requireMinuteSetting(obj.slot_minutes, 'slot_minutes', `restaurant ${id} slot_minutes`),
       reservation_duration_minutes: requireMinuteSetting(obj.reservation_duration_minutes, 'reservation_duration_minutes', `restaurant ${id} reservation_duration_minutes`),
@@ -196,13 +188,11 @@ function normalizeUsers(raw, hashes) {
     if (obj.password.length === 0) {
       throw errors.validationFailed(`user ${id} must have a password`);
     }
-    if (obj.display_name !== undefined && obj.display_name !== null) {
-      requireText(obj.display_name, `user ${id} display_name must be a string`);
-    }
+    requireText(obj.display_name, `user ${id} display_name must be a string`);
     return {
       id,
       email,
-      display_name: obj.display_name === undefined || obj.display_name === null ? email.split('@')[0] : obj.display_name,
+      display_name: obj.display_name,
       password_hash: hashes ? hashes[i] : S.hashPassword(obj.password),
     };
   });

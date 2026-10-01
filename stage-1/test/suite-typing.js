@@ -68,12 +68,17 @@ exports.run = async () => {
       '{"users":"ada"}',
       '{"reservations":3}',
       '{"restaurants":[7]}',
-      '{"restaurants":[{"id":"r_x","timezone":"Europe/Berlin","slot_minutes":30,"reservation_duration_minutes":30,"cancellation_cutoff_minutes":30,"tables":7}]}',
+      '{"restaurants":[{"id":"r_x","name":"R","timezone":"Europe/Berlin","slot_minutes":30,"reservation_duration_minutes":30,"cancellation_cutoff_minutes":30,"tables":7}]}',
+      '{"restaurants":[{"id":"r_x","name":null,"timezone":"Europe/Berlin","slot_minutes":30,"reservation_duration_minutes":30,"cancellation_cutoff_minutes":30,"tables":[]}]}',
     ];
-    for (const raw of bodies) {
+    for (const raw of bodies.slice(0, 5)) {
       const res = await L.call('POST', '/_test/reset', { rawBody: raw });
       L.expectError(res, 400, 'malformed_request', `raw ${raw}`);
     }
+    L.expectError(
+      await L.call('POST', '/_test/reset', { rawBody: bodies[5] }),
+      422, 'validation_failed', 'a required string field sent as null is missing, not mistyped',
+    );
   });
 
   await L.step('a fixture field of the wrong JSON type is 400, at every depth', async () => {
@@ -157,6 +162,52 @@ exports.run = async () => {
     }
     L.expectError(await resetAnswers(setPath(withField(BASE, ['restaurants', 0], {}), ['restaurants', 0, 'opening_hours', 0, 'closes'], 1800)), 400, 'malformed_request', 'a closing time that is a number');
     L.expectError(await resetAnswers(seededReservation({ restaurant_id: 7 })), 400, 'malformed_request', 'a seeded restaurant id that is a number');
+  });
+
+  /* name, label and display_name are typed as strings by section 4 and appear in
+   * the restaurant and reservation views, so a fixture that leaves one out is not
+   * a state the specification describes: absent or null is 422, wrong type is 400.
+   * The required and optional sets are pinned from both sides so neither blurs. */
+  await L.step('name, label and display_name are required strings, not optional ones', async () => {
+    for (const [path, label] of [
+      [['restaurants', 0, 'name'], 'restaurant name'],
+      [['restaurants', 0, 'tables', 0, 'label'], 'table label'],
+      [['users', 0, 'display_name'], 'user display name'],
+    ]) {
+      L.expectError(await resetAnswers(dropPath(clone(BASE), path)), 422, 'validation_failed', `${label} absent`);
+      L.expectError(await resetAnswers(setPath(clone(BASE), path, null)), 422, 'validation_failed', `${label} null`);
+      for (const [value, kind] of [[7, 'number'], [true, 'boolean'], [[], 'array'], [{}, 'object']]) {
+        L.expectError(
+          await resetAnswers(setPath(clone(BASE), path, value)),
+          400, 'malformed_request', `${label} as a ${kind}`,
+        );
+      }
+      /* A string is the correct type and section 4 states no format rule for these
+       * three, so any string is accepted rather than refused on a value rule. */
+      L.assert.equal(
+        (await resetAnswers(setPath(clone(BASE), path, '7'))).status,
+        204, `${label} as a string is the right type and is accepted`,
+      );
+    }
+  });
+
+  /* The second corollary: an optional field absent or null is not a missing-field
+   * error. A reservation's id, reference, status and created_at are optional. */
+  await L.step('an optional field absent or null is accepted as absent', async () => {
+    for (const [overrides, label] of [
+      [{ id: undefined }, 'a seeded reservation with no id'],
+      [{ id: null }, 'a seeded reservation with a null id'],
+      [{ id: 'res_1' }, 'a seeded reservation with a real id'],
+      [{ reference: undefined }, 'a seeded reservation with no reference'],
+      [{ reference: null }, 'a seeded reservation with a null reference'],
+      [{ status: null }, 'a seeded reservation with a null status'],
+      [{ created_at: null }, 'a seeded reservation with a null created_at'],
+    ]) {
+      const body = seededReservation(overrides);
+      if (overrides.id === undefined) delete body.reservations[0].id;
+      if (overrides.reference === undefined) delete body.reservations[0].reference;
+      L.assert.equal((await resetAnswers(body)).status, 204, label);
+    }
   });
 
   await L.step('a fixture field of the right type with a bad value is still 422', async () => {
