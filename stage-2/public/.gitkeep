@@ -1,0 +1,11 @@
+Kept so this directory always exists in the build context.
+
+The Dockerfile runs COPY public ./public, and a COPY of a source directory that
+does not exist fails the build outright. There is no glob form of COPY that
+tolerates a total miss, and a RUN mkdir before the COPY would create the
+destination but not the source, so an empty file here is what makes the image
+build whether or not anything has been committed to public/ yet.
+
+This file is never served: static.js answers only .html, .css, .js, .png and
+.svg, and an unrecognised extension is a miss rather than an octet-stream
+answer, so a request for /.gitkeep is a JSON 404 like any other unknown path.

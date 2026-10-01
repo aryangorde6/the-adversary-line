@@ -44,7 +44,7 @@ async function call(method, path, options = {}) {
       json = null;
     }
   }
-  return { status: res.status, json, text };
+  return { status: res.status, json, text, headers: res.headers };
 }
 
 function expectError(res, status, code, label) {

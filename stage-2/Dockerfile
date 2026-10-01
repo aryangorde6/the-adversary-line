@@ -3,6 +3,7 @@ FROM node:22-alpine
 WORKDIR /srv/tablekeeper
 COPY package.json ./
 COPY src ./src
+COPY public ./public
 
 ENV NODE_ENV=production
 ENV PORT=8080

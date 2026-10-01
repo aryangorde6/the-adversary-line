@@ -6,6 +6,7 @@ const M = require('./model');
 const S = require('./store');
 const R = require('./routes');
 const X = require('./transfer');
+const ST = require('./static');
 const { reservationMoves } = require('./moves');
 
 const MAX_BODY_BYTES = 8 * 1024 * 1024;
@@ -145,6 +146,13 @@ async function handle(req, res) {
   const pathname = url.pathname.length > 1 ? url.pathname.replace(/\/+$/, '') : url.pathname;
   const matched = matchRoute(req.method, pathname);
   if (!matched) {
+    /* Static answers are tried only once the API has declined the path, so an
+     * endpoint is never shadowed by a file and a screen route can never shadow
+     * an endpoint. An unknown path then keeps the JSON error body, which is the
+     * only 404 shape this service has besides a missing file, and those two
+     * must not be confused: the four screen routes are the only HTML answers. */
+    const served = await ST.serve(req, res, pathname);
+    if (served) return;
     sendJson(res, 404, { error: { code: 'not_found', message: 'no such endpoint' } });
     return;
   }
@@ -211,4 +219,4 @@ function createServer() {
   return server;
 }
 
-module.exports = { createServer, matchRoute, parseBody, requireIdempotencyKey, bearerToken, X };
+module.exports = { createServer, matchRoute, parseBody, requireIdempotencyKey, bearerToken, X, ST };
