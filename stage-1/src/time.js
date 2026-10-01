@@ -78,9 +78,51 @@ function resolveLocal(zone, year, month, day, hour, minute) {
       matches.push(t);
     }
   }
-  if (matches.length === 0) return { kind: 'gap' };
+  if (matches.length === 0) {
+    const gap = gapBounds(zone, naive);
+    return { kind: 'gap', gapFrom: gap && { hour: gap.fromHour, minute: gap.fromMinute }, gapTo: gap && { hour: gap.toHour, minute: gap.toMinute } };
+  }
   matches.sort((a, b) => a - b);
   return { kind: 'ok', instantMs: matches[0], ambiguous: matches.length > 1 };
+}
+
+/**
+ * First instant in (loMs, hiMs] at which the zone offset differs from the
+ * offset at loMs, found by bisection on whole minutes. Null when the offset
+ * never changes in the window.
+ */
+function firstTransition(zone, loMs, hiMs) {
+  const before = offsetMsAt(loMs, zone);
+  if (offsetMsAt(hiMs, zone) === before) return null;
+  let lo = loMs;
+  let hi = hiMs;
+  while (hi - lo > 60000) {
+    const mid = lo + Math.floor((hi - lo) / 2);
+    if (offsetMsAt(mid, zone) === before) lo = mid;
+    else hi = mid;
+  }
+  return hi;
+}
+
+/**
+ * The wall-clock window a spring-forward jump skips, as local hours and
+ * minutes. Null when no forward jump is found in the window around the time.
+ */
+function gapBounds(zone, naiveMs) {
+  const at = firstTransition(zone, naiveMs - DAY_MS, naiveMs + DAY_MS);
+  if (at === null) return null;
+  const jumped = (offsetMsAt(at, zone) - offsetMsAt(at - 60000, zone)) / 60000;
+  if (jumped <= 0) return null;
+  const after = partsOf(at, zone);
+  const toMinutes = after.hour * 60 + after.minute;
+  const fromMinutes = toMinutes - jumped;
+  if (fromMinutes < 0) return null;
+  return {
+    fromHour: Math.floor(fromMinutes / 60),
+    fromMinute: fromMinutes % 60,
+    toHour: after.hour,
+    toMinute: after.minute,
+  };
 }
 
 function isCalendarDate(year, month, day) {
@@ -123,6 +165,33 @@ function rfc3339(instantMs, zone) {
 
 function weekdayName(year, month, day) {
   return WEEKDAYS[new Date(Date.UTC(year, month - 1, day)).getUTCDay()];
+}
+
+/* ---- words for messages a person reads ---- */
+
+const WEEKDAY_WORDS = ['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday'];
+const MONTH_WORDS = [
+  'January', 'February', 'March', 'April', 'May', 'June',
+  'July', 'August', 'September', 'October', 'November', 'December',
+];
+
+function weekdayWord(year, month, day) {
+  return WEEKDAY_WORDS[new Date(Date.UTC(year, month - 1, day)).getUTCDay()];
+}
+
+/** "22 September 2026" */
+function dateWords(year, month, day) {
+  return `${day} ${MONTH_WORDS[month - 1]} ${year}`;
+}
+
+/** "19:00" */
+function timeWords(hour, minute) {
+  return `${pad2(hour)}:${pad2(minute)}`;
+}
+
+/** "90 minutes", "1 minute" */
+function minutesWords(count) {
+  return count === 1 ? '1 minute' : `${count} minutes`;
 }
 
 function minutesOfDay(hour, minute) {
@@ -181,6 +250,10 @@ module.exports = {
   offsetText,
   rfc3339,
   weekdayName,
+  weekdayWord,
+  dateWords,
+  timeWords,
+  minutesWords,
   minutesOfDay,
   parseLocalMinute,
   parseDate,
