@@ -40,7 +40,9 @@ function normalizeReservations(raw, restaurants) {
       throw errors.validationFailed('reservation.party_size must be a positive integer');
     }
     const fields = T.parseLocalMinute(obj.starts_at_local);
-    if (!fields) throw errors.validationFailed('reservation.starts_at_local must be a bare local YYYY-MM-DDTHH:MM value');
+    if (!fields) {
+      throw errors.validationFailed('The start time must be written like 2026-09-24T19:00, with no seconds and no time zone.');
+    }
     const local = T.resolveLocal(restaurant.timezone, fields.year, fields.month, fields.day, fields.hour, fields.minute);
     if (local.kind !== 'ok') throw errors.validationFailed('reservation.starts_at_local does not exist at that restaurant');
     const status = obj.status === undefined || obj.status === null ? 'confirmed' : String(obj.status);

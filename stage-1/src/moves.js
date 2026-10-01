@@ -35,7 +35,7 @@ function reservationMoves(ctx) {
   const reservations = items.map((item) => {
     const reservation = M.index.reservationsByRef.get(item.reference);
     if (!reservation || reservation.user_id !== ctx.user.id) {
-      throw errors.notFound('no such reservation in your bookings');
+      throw errors.notFound('We could not find a booking with that reference in your bookings.');
     }
     return reservation;
   });
@@ -53,7 +53,7 @@ function reservationMoves(ctx) {
     const item = items[i];
     if (reservation.status === 'cancelled') throw errors.reservationCancelled('the reservation is already cancelled');
     if (R.cutoffReached(reservation, restaurant, now)) {
-      throw errors.cutoffPassed('the amendment cutoff for this booking has passed');
+      throw errors.cutoffPassed(D.cutoffMessage(restaurant, reservation.starts_at_local));
     }
     const target = D.resolveTarget(
       restaurant,

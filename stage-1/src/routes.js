@@ -29,7 +29,7 @@ function optionalPartySize(body, name) {
   const value = body[name];
   if (value === undefined || value === null) return undefined;
   if (typeof value !== 'number' || !Number.isInteger(value) || value < 1) {
-    throw errors.validationFailed(`${name} must be an integer of at least 1`);
+    throw errors.validationFailed('the number of guests must be a whole number of at least 1.');
   }
   return value;
 }
@@ -61,7 +61,9 @@ function cutoffReached(reservation, restaurant, now) {
 
 function ownReservation(user, reference) {
   const reservation = M.index.reservationsByRef.get(reference);
-  if (!reservation || reservation.user_id !== user.id) throw errors.notFound('no such reservation');
+  if (!reservation || reservation.user_id !== user.id) {
+    throw errors.notFound('We could not find a booking with that reference in your bookings.');
+  }
   return reservation;
 }
 
@@ -114,7 +116,7 @@ async function prepareSignup(ctx) {
   const password = optionalString(body, 'password');
   if (password === undefined) throw errors.validationFailed('password is required');
   if (password.length < 8) throw errors.validationFailed('password must be at least 8 characters');
-  if (!S.emailLooksValid(email)) throw errors.validationFailed('email must be of the form local@domain');
+  if (!S.emailLooksValid(email)) throw errors.validationFailed('That does not look like an email address.');
   const displayName = optionalString(body, 'display_name');
   return { email, displayName, passwordHash: await S.hashPasswordAsync(password) };
 }
@@ -155,7 +157,7 @@ function availability(ctx) {
   const restaurant = restaurantById(restaurantId);
   const date = T.parseDate(dateText);
   if (!date) throw errors.validationFailed('date must be a real calendar date written as YYYY-MM-DD');
-  if (partySize < 1) throw errors.validationFailed('party_size must be at least 1');
+  if (partySize < 1) throw errors.validationFailed('the number of guests must be a whole number of at least 1.');
   const weekday = T.weekdayName(date.year, date.month, date.day);
   const durationMs = restaurant.reservation_duration_minutes * 60000;
   const slots = [];
@@ -230,7 +232,7 @@ function cancelReservation(ctx) {
   if (reservation.status === 'cancelled') return { status: 200, body: V.reservationView(reservation) };
   const restaurant = restaurantById(reservation.restaurant_id);
   if (cutoffReached(reservation, restaurant, Date.now())) {
-    throw errors.cutoffPassed('the cancellation cutoff for this booking has passed');
+    throw errors.cutoffPassed(D.cutoffMessage(restaurant, reservation.starts_at_local));
   }
   reservation.status = 'cancelled';
   M.reindex();
@@ -243,7 +245,7 @@ function patchReservation(ctx) {
   if (reservation.status === 'cancelled') throw errors.reservationCancelled('the reservation is already cancelled');
   const restaurant = restaurantById(reservation.restaurant_id);
   if (cutoffReached(reservation, restaurant, Date.now())) {
-    throw errors.cutoffPassed('the amendment cutoff for this booking has passed');
+    throw errors.cutoffPassed(D.cutoffMessage(restaurant, reservation.starts_at_local));
   }
   const tableId = optionalString(body, 'table_id') === undefined ? reservation.table_id : optionalString(body, 'table_id');
   const startsAtLocal = optionalString(body, 'starts_at_local') === undefined ? reservation.starts_at_local : optionalString(body, 'starts_at_local');

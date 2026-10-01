@@ -194,6 +194,11 @@ function minutesWords(count) {
   return count === 1 ? '1 minute' : `${count} minutes`;
 }
 
+/** The compound form used before a noun: "a 90 minute booking". */
+function minutesAdjective(count) {
+  return `${count} minute`;
+}
+
 function minutesOfDay(hour, minute) {
   return hour * 60 + minute;
 }
@@ -254,6 +259,7 @@ module.exports = {
   dateWords,
   timeWords,
   minutesWords,
+  minutesAdjective,
   minutesOfDay,
   parseLocalMinute,
   parseDate,

@@ -11,6 +11,7 @@ const SUITES = [
   require('./suite-moves'),
   require('./suite-transfer'),
   require('./suite-concurrency'),
+  require('./suite-wording'),
 ];
 
 async function main() {
