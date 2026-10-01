@@ -142,8 +142,36 @@ function requireObject(value, message) {
   return value;
 }
 
+/* ---- fixture field types ----
+ * Spec section 5 reserves 400 malformed_request for a body that does not parse
+ * or a field of the wrong JSON type, and gives 422 validation_failed to a field
+ * of the correct type whose format or value is wrong. These guards draw that
+ * line for the fixture path only; the endpoint paths keep their own rules, and
+ * section 11 keeps a badly shaped batch move at 422. */
+
+function requireRecord(value, message) {
+  if (!isPlainObject(value)) throw errors.malformedRequest(message);
+  return value;
+}
+
+function requireList(value, message) {
+  if (!Array.isArray(value)) throw errors.malformedRequest(message);
+  return value;
+}
+
+function requireText(value, message) {
+  if (typeof value !== 'string') throw errors.malformedRequest(message);
+  return value;
+}
+
+function requireAmount(value, message) {
+  if (typeof value !== 'number' || Number.isNaN(value)) throw errors.malformedRequest(message);
+  return value;
+}
+
 function requireId(value, name) {
-  if (typeof value !== 'string' || value.length === 0 || value.length > MAX_ID_LENGTH) {
+  if (typeof value !== 'string') throw errors.malformedRequest(`${name} must be a string`);
+  if (value.length === 0 || value.length > MAX_ID_LENGTH) {
     throw errors.validationFailed(`${name} must be a non-empty string of at most ${MAX_ID_LENGTH} characters`);
   }
   return value;
@@ -180,6 +208,10 @@ module.exports = {
   verifyPasswordAsync,
   isPlainObject,
   requireObject,
+  requireRecord,
+  requireList,
+  requireText,
+  requireAmount,
   requireId,
   requireInteger,
   emailLooksValid,

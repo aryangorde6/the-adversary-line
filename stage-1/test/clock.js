@@ -46,17 +46,23 @@ function localSlotFromNow(offsetMinutes, stepMinutes = 30) {
   return { text: `${dateText}T${String(hour).padStart(2, '0')}:${String(minute).padStart(2, '0')}`, weekday: b.weekday, dateText };
 }
 
-/** A fixture whose first restaurant is open every day, so any local slot is valid. */
+/**
+ * A fixture whose first restaurant is open every day until the end of the day,
+ * so any local slot a probe derives from the clock is bookable whatever hour the
+ * suite happens to run at. Closing at 24:00 rather than 23:59 matters: a probe
+ * that lands on 23:30 with a 30 minute booking would otherwise be rejected for
+ * ending after closing, which would make the suite fail by time of day alone.
+ */
 function alwaysOpen(base, overrides = {}) {
   const fixture = JSON.parse(JSON.stringify(base));
   fixture.restaurants[0].opening_hours = [
-    { weekday: 'mon', opens: '00:00', closes: '23:59' },
-    { weekday: 'tue', opens: '00:00', closes: '23:59' },
-    { weekday: 'wed', opens: '00:00', closes: '23:59' },
-    { weekday: 'thu', opens: '00:00', closes: '23:59' },
-    { weekday: 'fri', opens: '00:00', closes: '23:59' },
-    { weekday: 'sat', opens: '00:00', closes: '23:59' },
-    { weekday: 'sun', opens: '00:00', closes: '23:59' },
+    { weekday: 'mon', opens: '00:00', closes: '24:00' },
+    { weekday: 'tue', opens: '00:00', closes: '24:00' },
+    { weekday: 'wed', opens: '00:00', closes: '24:00' },
+    { weekday: 'thu', opens: '00:00', closes: '24:00' },
+    { weekday: 'fri', opens: '00:00', closes: '24:00' },
+    { weekday: 'sat', opens: '00:00', closes: '24:00' },
+    { weekday: 'sun', opens: '00:00', closes: '24:00' },
   ];
   fixture.restaurants[0].slot_minutes = 30;
   fixture.restaurants[0].reservation_duration_minutes = 30;

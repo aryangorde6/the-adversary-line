@@ -10,11 +10,11 @@ const D = require('./domain');
 
 function normalizeReservations(raw, restaurants) {
   if (raw === undefined || raw === null) return [];
-  if (!Array.isArray(raw)) throw errors.validationFailed('reservations must be an array');
+  S.requireList(raw, 'reservations must be an array');
   const seenIds = new Set();
   const seenRefs = new Set();
   return raw.map((entry) => {
-    const obj = M.requireObject(entry, 'reservation must be an object');
+    const obj = M.requireRecord(entry, 'reservation must be an object');
     const restaurant = restaurants.find((r) => r.id === obj.restaurant_id);
     if (!restaurant) throw errors.validationFailed('seeded reservation references an unknown restaurant');
     const tableId = S.requireId(obj.table_id, 'reservation.table_id');
@@ -39,13 +39,17 @@ function normalizeReservations(raw, restaurants) {
     if (typeof partySize !== 'number' || !Number.isInteger(partySize) || partySize < 1) {
       throw errors.validationFailed('reservation.party_size must be a positive integer');
     }
+    S.requireText(obj.starts_at_local, 'The start time must be written like 2026-09-24T19:00, with no seconds and no time zone.');
     const fields = T.parseLocalMinute(obj.starts_at_local);
     if (!fields) {
       throw errors.validationFailed('The start time must be written like 2026-09-24T19:00, with no seconds and no time zone.');
     }
     const local = T.resolveLocal(restaurant.timezone, fields.year, fields.month, fields.day, fields.hour, fields.minute);
     if (local.kind !== 'ok') throw errors.validationFailed('reservation.starts_at_local does not exist at that restaurant');
-    const status = obj.status === undefined || obj.status === null ? 'confirmed' : String(obj.status);
+    if (obj.status !== undefined && obj.status !== null) {
+      S.requireText(obj.status, 'seeded reservation status must be a string');
+    }
+    const status = obj.status === undefined || obj.status === null ? 'confirmed' : obj.status;
     if (status !== 'confirmed' && status !== 'cancelled') {
       throw errors.validationFailed('reservation.status must be confirmed or cancelled');
     }
@@ -74,14 +78,14 @@ function normalizeReservations(raw, restaurants) {
  * requests for its duration.
  */
 async function buildFixture(fixture) {
-  const body = M.requireObject(fixture === undefined || fixture === null ? {} : fixture, 'fixture must be a JSON object');
+  const body = M.requireRecord(fixture === undefined || fixture === null ? {} : fixture, 'fixture must be a JSON object');
   const restaurants = M.normalizeRestaurants(body.restaurants);
   const rawUsers = body.users === undefined || body.users === null ? [] : body.users;
-  if (!Array.isArray(rawUsers)) throw errors.validationFailed('users must be an array');
+  S.requireList(rawUsers, 'users must be an array');
   const hashes = await S.hashManyAsync(rawUsers.map((u) => {
-    if (!M.isPlainObject(u) || typeof u.password !== 'string' || u.password.length === 0) {
-      throw errors.validationFailed('every seeded user needs a password');
-    }
+    M.requireRecord(u, 'every seeded user must be an object');
+    S.requireText(u.password, 'every seeded user password must be a string');
+    if (u.password.length === 0) throw errors.validationFailed('every seeded user needs a password');
     return u.password;
   }));
   const users = M.normalizeUsers(rawUsers, hashes);

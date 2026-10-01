@@ -12,6 +12,7 @@ const SUITES = [
   require('./suite-transfer'),
   require('./suite-concurrency'),
   require('./suite-wording'),
+  require('./suite-typing'),
 ];
 
 async function main() {

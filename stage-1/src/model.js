@@ -4,7 +4,7 @@ const { errors } = require('./errors');
 const S = require('./store');
 const T = require('./time');
 
-const { requireObject, requireId, isPlainObject } = S;
+const { requireRecord, requireList, requireText, requireAmount, requireId, isPlainObject } = S;
 
 const REFERENCE_PATTERN = /^[A-Z0-9]{6,12}$/;
 
@@ -63,7 +63,8 @@ function getState() {
 }
 
 function requireSlot(value, label) {
-  if (typeof value !== 'number' || !Number.isInteger(value) || value < 1) {
+  requireAmount(value, `${label} must be a number of minutes`);
+  if (!Number.isInteger(value) || value < 1) {
     throw errors.validationFailed(`${label} must be a positive whole number of minutes`);
   }
   return value;
@@ -71,11 +72,14 @@ function requireSlot(value, label) {
 
 function normalizeOpeningHours(raw, label) {
   if (raw === undefined || raw === null) return [];
-  if (!Array.isArray(raw)) throw errors.validationFailed(`${label}.opening_hours must be an array`);
+  requireList(raw, `${label}.opening_hours must be an array`);
   return raw.map((entry) => {
-    const obj = requireObject(entry, `${label}.opening_hours entry must be an object`);
-    const weekday = String(obj.weekday === undefined ? '' : obj.weekday).toLowerCase();
+    const obj = requireRecord(entry, `${label}.opening_hours entry must be an object`);
+    requireText(obj.weekday, `${label}.opening_hours.weekday must be a string`);
+    const weekday = obj.weekday.toLowerCase();
     if (!T.WEEKDAYS.includes(weekday)) throw errors.validationFailed(`${label}.opening_hours.weekday is invalid`);
+    requireText(obj.opens, `${label}.opening_hours.opens must be a string`);
+    requireText(obj.closes, `${label}.opening_hours.closes must be a string`);
     const opens = T.parseTimeOfDay(obj.opens);
     const closes = T.parseTimeOfDay(obj.closes);
     if (!opens || !closes) throw errors.validationFailed(`${label}.opening_hours times must be HH:MM`);
@@ -89,15 +93,19 @@ function normalizeOpeningHours(raw, label) {
 
 function normalizeTables(raw, label) {
   if (raw === undefined || raw === null) return [];
-  if (!Array.isArray(raw)) throw errors.validationFailed(`${label}.tables must be an array`);
+  requireList(raw, `${label}.tables must be an array`);
   const seen = new Set();
   return raw.map((entry) => {
-    const obj = requireObject(entry, `${label}.tables entry must be an object`);
+    const obj = requireRecord(entry, `${label}.tables entry must be an object`);
     const id = requireId(obj.id, `${label}.tables[].id`);
     if (seen.has(id)) throw errors.validationFailed(`${label}.tables contains duplicate id ${id}`);
     seen.add(id);
-    if (typeof obj.capacity !== 'number' || !Number.isInteger(obj.capacity) || obj.capacity < 1) {
+    requireAmount(obj.capacity, `${label}.tables[].capacity must be a number`);
+    if (!Number.isInteger(obj.capacity) || obj.capacity < 1) {
       throw errors.validationFailed(`${label}.tables[].capacity must be a positive integer`);
+    }
+    if (obj.label !== undefined && obj.label !== null) {
+      requireText(obj.label, `${label}.tables[].label must be a string`);
     }
     return {
       id,
@@ -109,17 +117,21 @@ function normalizeTables(raw, label) {
 
 function normalizeRestaurants(raw) {
   if (raw === undefined || raw === null) return [];
-  if (!Array.isArray(raw)) throw errors.validationFailed('restaurants must be an array');
+  requireList(raw, 'restaurants must be an array');
   const seen = new Set();
   return raw.map((entry) => {
-    const obj = requireObject(entry, 'restaurant must be an object');
+    const obj = requireRecord(entry, 'restaurant must be an object');
     const id = requireId(obj.id, 'restaurant.id');
     if (seen.has(id)) throw errors.validationFailed(`duplicate restaurant id ${id}`);
     seen.add(id);
+    requireText(obj.timezone, `restaurant ${id} timezone must be a string`);
     if (!T.isValidZone(obj.timezone)) throw errors.validationFailed(`restaurant ${id} has an invalid timezone`);
+    if (obj.name !== undefined && obj.name !== null) {
+      requireText(obj.name, `restaurant ${id} name must be a string`);
+    }
     return {
       id,
-      name: obj.name === undefined || obj.name === null ? id : String(obj.name),
+      name: obj.name === undefined || obj.name === null ? id : obj.name,
       timezone: obj.timezone,
       slot_minutes: requireSlot(obj.slot_minutes, `restaurant ${id} slot_minutes`),
       reservation_duration_minutes: requireSlot(obj.reservation_duration_minutes, `restaurant ${id} reservation_duration_minutes`),
@@ -132,31 +144,40 @@ function normalizeRestaurants(raw) {
 
 function normalizeUsers(raw, hashes) {
   if (raw === undefined || raw === null) return [];
-  if (!Array.isArray(raw)) throw errors.validationFailed('users must be an array');
+  requireList(raw, 'users must be an array');
   const seenIds = new Set();
   const seenEmails = new Set();
   return raw.map((entry, i) => {
-    const obj = requireObject(entry, 'user must be an object');
+    const obj = requireRecord(entry, 'user must be an object');
     const id = requireId(obj.id, 'user.id');
     if (seenIds.has(id)) throw errors.validationFailed(`duplicate user id ${id}`);
     seenIds.add(id);
+    requireText(obj.email, `user ${id} email must be a string`);
     if (!S.emailLooksValid(obj.email)) throw errors.validationFailed(`user ${id} has an invalid email`);
-    const email = String(obj.email).toLowerCase();
+    const email = obj.email.toLowerCase();
     if (seenEmails.has(email)) throw errors.validationFailed(`duplicate email ${email}`);
     seenEmails.add(email);
-    if (typeof obj.password !== 'string' || obj.password.length === 0) {
+    requireText(obj.password, `user ${id} password must be a string`);
+    if (obj.password.length === 0) {
       throw errors.validationFailed(`user ${id} must have a password`);
+    }
+    if (obj.display_name !== undefined && obj.display_name !== null) {
+      requireText(obj.display_name, `user ${id} display_name must be a string`);
     }
     return {
       id,
       email,
-      display_name: obj.display_name === undefined || obj.display_name === null ? email.split('@')[0] : String(obj.display_name),
+      display_name: obj.display_name === undefined || obj.display_name === null ? email.split('@')[0] : obj.display_name,
       password_hash: hashes ? hashes[i] : S.hashPassword(obj.password),
     };
   });
 }
 
 module.exports = {
+  requireRecord,
+  requireList,
+  requireText,
+  requireAmount,
   emptyState,
   reindex,
   receiptKey,
@@ -168,6 +189,6 @@ module.exports = {
   normalizeOpeningHours,
   normalizeTables,
   normalizeUsers,
-  requireObject,
+  requireObject: S.requireObject,
   isPlainObject,
 };
