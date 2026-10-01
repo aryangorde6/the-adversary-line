@@ -55,10 +55,12 @@ export default async function run() {
     let runHealth = 0;
     let runError = '';
     if (runSeg) {
-      /* --name has to sit before the image name, or docker passes it to the
-       * container as an argument instead of naming it. */
+      /* The documented start runs in the foreground, which a probe cannot read
+       * /health from, so it is detached; the container is named so the check can
+       * stop it again. --name has to sit before the image name, or docker passes
+       * it to the container as an argument instead of naming it. */
       const runCmd = runSeg.replace(/\btablekeeper\b/g, IMAGE)
-        .replace(/\bdocker run\b/, `docker run --name ${runName}`)
+        .replace(/\bdocker run\b/, `docker run -d --name ${runName}`)
         .replace(/--rm\b/, '')
         .replace(/-p\s+\S+/, '-p 18081:8080');
       let started = true;
@@ -67,7 +69,7 @@ export default async function run() {
       runOk = runHealth === 200;
     }
     record('D1', existsSync(RUN_MD) && /build/i.test(runMd) && /run/i.test(runMd) && buildOk && runOk,
-      `RUN.md ${existsSync(RUN_MD) ? 'exists' : 'is missing'}; documented build ${JSON.stringify(buildSeg)} ran from the clone: ${buildOk}; documented start ${JSON.stringify(runSeg)} ran with only the tag and the host port changed${runError ? ` and failed: ${runError}` : ''}, and /health answered ${runHealth}`);
+      `RUN.md ${existsSync(RUN_MD) ? 'exists' : 'is missing'}; documented build ${JSON.stringify(buildSeg)} ran from the clone: ${buildOk}; documented start ${JSON.stringify(runSeg)} ran detached with only the tag and the host port changed${runError ? ` and failed: ${runError}` : ''}, and /health answered ${runHealth}`);
 
     // D2 and D6 a plain docker build of the stage folder, and the image alone serves everything
     let plainBuild = 'ok';
