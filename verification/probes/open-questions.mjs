@@ -17,13 +17,14 @@ export default async function run() {
   // O1 may a fixture declare cancellation_cutoff_minutes 0
   const withCutoff = (value) => fixture({ restaurants: [restaurant({ id: 'r_cut', name: 'Cut', cancellation_cutoff_minutes: value, slot_minutes: 15, reservation_duration_minutes: 60, opening_hours: [{ weekday: weekdayOf(today()), opens: '00:00', closes: '23:45' }] })] });
   const seen = [];
-  const answers = {};
-  for (const value of [0, -1, 1, 0.5, '0', 10081, 604800]) {
+  const answers = [];
+  const cases = [[0, 204], [-1, 422], [1, 204], [30.5, 422], ['0', 400], [10081, 204], [60 * 24 * 3650, 204], [604800, 204]];
+  for (const [value, want] of cases) {
     const res = await resetRaw(withCutoff(value));
-    answers[value] = res.status;
-    seen.push(`${JSON.stringify(value)} ${res.status} ${res.text.slice(0, 90)}`);
+    answers.push({ line: `${JSON.stringify(value)} ${res.status} ${res.text.slice(0, 80)}`, ok: res.status === want });
+    seen.push(`${JSON.stringify(value)} ${res.status}`);
   }
-  record('O1', answers[0] === 204, seen.join('; '));
+  record('O1', answers.every((entry) => entry.ok), seen.join('; '));
 
   // O2 the same field with the same value through the other test endpoint
   await reset(fixture());

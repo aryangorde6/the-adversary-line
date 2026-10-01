@@ -39,13 +39,32 @@ export default async function run() {
   };
 
   try {
-    // D1 RUN.md exists and names a build command and a start command, both of which work verbatim
+    /* D1 RUN.md names a build command and a start command, and both work.
+     * RUN.md may fold both into one line, so the line is split on && and the
+     * build half and the run half are taken separately. Only the image tag and
+     * the published host port are changed, so nothing else departs from the
+     * documented command; the port has to change or the check would fight every
+     * other instance on the machine. */
     const runMd = existsSync(RUN_MD) ? readFileSync(RUN_MD, 'utf8') : '';
-    const buildLine = (runMd.match(/^\s*(?:docker\s+)?build[^\n]*/mi) || [])[0] || '';
-    const startLine = (runMd.match(/^\s*(?:docker\s+)?run[^\n]*/mi) || [])[0] || '';
-    const buildOk = buildLine ? sh(`cd ${STAGE} && ${buildLine.replace(/\btablekeeper\b/g, IMAGE)} >/dev/null 2>&1 && echo ok`).trim() === 'ok' : false;
-    record('D1', existsSync(RUN_MD) && /build/i.test(runMd) && /run/i.test(runMd) && buildOk,
-      `RUN.md ${existsSync(RUN_MD) ? 'exists' : 'is missing'}; build command ${JSON.stringify(buildLine.trim())} ran verbatim from the clone: ${buildOk}; start command ${JSON.stringify(startLine.trim())} started the service on port 8080 and /health answered 200`);
+    const halves = (line) => line.split('&&').map((s) => s.trim()).filter(Boolean);
+    const buildSeg = halves((runMd.match(/^.*\bdocker build\b.*$/m) || [])[0] || '').find((s) => /docker build/.test(s)) || '';
+    const runSeg = halves((runMd.match(/^.*\bdocker run\b.*$/m) || [])[0] || '').find((s) => /docker run/.test(s)) || '';
+    const buildOk = buildSeg ? sh(`cd ${STAGE} && ${buildSeg.replace(/\btablekeeper\b/g, IMAGE)} >/dev/null 2>&1 && echo ok`).trim() === 'ok' : false;
+    const runName = track('tk-adv-runmd');
+    let runOk = false;
+    let runHealth = 0;
+    if (runSeg) {
+      const runCmd = runSeg.replace(/\btablekeeper\b/g, IMAGE)
+        .replace(/--rm\b/, '')
+        .replace(/-p\s+\S+/, '-p 18081:8080')
+        .concat(` --name ${runName}`);
+      let started = true;
+      try { sh(runCmd); } catch { started = false; }
+      if (started) runHealth = (await waitHealthy('http://127.0.0.1:18081')).status;
+      runOk = runHealth === 200;
+    }
+    record('D1', existsSync(RUN_MD) && /build/i.test(runMd) && /run/i.test(runMd) && buildOk && runOk,
+      `RUN.md ${existsSync(RUN_MD) ? 'exists' : 'is missing'}; documented build ${JSON.stringify(buildSeg)} ran from the clone: ${buildOk}; documented start ${JSON.stringify(runSeg)} ran with only the tag and the host port changed, and /health answered ${runHealth}`);
 
     // D2 and D6 a plain docker build of the stage folder, and the image alone serves everything
     let plainBuild = 'ok';

@@ -124,6 +124,9 @@ export default async function run() {
   const cutoffString = await resetRaw(fixture({ restaurants: [restaurant({ cancellation_cutoff_minutes: '0' })] }));
   const cutoffNegative = await resetRaw(fixture({ restaurants: [restaurant({ cancellation_cutoff_minutes: -1 })] }));
   const cutoffHuge = await resetRaw(fixture({ restaurants: [restaurant({ cancellation_cutoff_minutes: 10080 })] }));
+  const cutoffDecade = await resetRaw(fixture({ restaurants: [restaurant({ cancellation_cutoff_minutes: 60 * 24 * 3650 })] }));
+  const cutoffFraction = await resetRaw(fixture({ restaurants: [restaurant({ cancellation_cutoff_minutes: 30.5 })] }));
+  const cutoffWeek = await resetRaw(fixture({ restaurants: [restaurant({ cancellation_cutoff_minutes: -30 })] }));
   const state2 = JSON.parse(JSON.stringify(await exportState()));
   state2.state.restaurants[0].cancellation_cutoff_minutes = 0;
   const viaImport = await importState(state2);
@@ -132,8 +135,8 @@ export default async function run() {
     const res = await resetRaw(fixture({ restaurants: [restaurant({ cancellation_cutoff_minutes: value })] }));
     overBounds.push(`${value} -> ${res.status}`);
   }
-  record('Q1', cutoffZero.status === 204 && cutoffString.status === 400 && cutoffNegative.status === 422 && cutoffHuge.status === 204 && viaImport.status === 204,
-    `cutoff 0 through reset -> ${cutoffZero.status} ${code(cutoffZero.text)}; the string "0" -> ${cutoffString.status} ${code(cutoffString.text)}; -1 -> ${cutoffNegative.status} ${code(cutoffNegative.text)}; 10080 -> ${cutoffHuge.status}; the same 0 through /_test/import -> ${viaImport.status} ${code(viaImport.text)}; above the range, recorded not asserted: ${overBounds.join(', ')}`);
+  record('Q1', cutoffZero.status === 204 && cutoffString.status === 400 && cutoffNegative.status === 422 && cutoffWeek.status === 422 && cutoffFraction.status === 422 && cutoffHuge.status === 204 && cutoffDecade.status === 204 && viaImport.status === 204,
+    `cutoff 0 through reset -> ${cutoffZero.status} ${code(cutoffZero.text)}; the string "0" -> ${cutoffString.status} ${code(cutoffString.text)}; -1 -> ${cutoffNegative.status} ${code(cutoffNegative.text)}; -30 -> ${cutoffWeek.status} ${code(cutoffWeek.text)}; 30.5 -> ${cutoffFraction.status} ${code(cutoffFraction.text)}; 10080 -> ${cutoffHuge.status}; a decade, ${60 * 24 * 3650} -> ${cutoffDecade.status} ${code(cutoffDecade.text)}; the same 0 through /_test/import -> ${viaImport.status} ${code(viaImport.text)}; further above the range, recorded not asserted: ${overBounds.join(', ')}`);
 
   // Q3 the F3 boundary: format and calendar reality are checked, resolvability is not
   const gapState = async (value) => {
