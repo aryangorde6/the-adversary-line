@@ -14,6 +14,8 @@ const GROUPS = [
   './xport.mjs',
   './moves.mjs',
   './delivery.mjs',
+  './delta.mjs',
+  './open-questions.mjs',
 ];
 
 for (const path of GROUPS) {
