@@ -62,12 +62,44 @@ function getState() {
   return state;
 }
 
-function requireSlot(value, label) {
-  requireAmount(value, `${label} must be a number of minutes`);
-  if (!Number.isInteger(value) || value < 1) {
-    throw errors.validationFailed(`${label} must be a positive whole number of minutes`);
+/* The three minute settings do not share one range. A slot step of zero would make
+ * slot generation non-terminating and a zero length reservation is degenerate, so
+ * both start at 1. A cutoff of zero is a real policy: every booking is then inside
+ * the cutoff, which is what the arithmetic in the booking path already does. Its
+ * ceiling is the same range a later stage publishes for the field, so a fixture
+ * can express any policy value the service is required to accept. */
+const MINUTE_BOUNDS = {
+  slot_minutes: { min: 1, max: undefined },
+  reservation_duration_minutes: { min: 1, max: undefined },
+  cancellation_cutoff_minutes: { min: 0, max: 10080 },
+};
+
+/* Returns the reason a minute setting is unusable, or null when it is fine.
+ * A non-number is reported here too so the import validator can reuse this; the
+ * fixture path checks the JSON type first and answers 400 for it. */
+function minuteSettingProblem(value, label, bounds) {
+  if (typeof value !== 'number' || !Number.isInteger(value)) return `${label} must be a whole number of minutes`;
+  if (value < bounds.min) {
+    return bounds.min === 1
+      ? `${label} must be a positive whole number of minutes`
+      : `${label} must not be negative`;
   }
+  if (bounds.max !== undefined && value > bounds.max) return `${label} must be at most ${bounds.max} minutes`;
+  return null;
+}
+
+function requireMinuteSetting(value, field, label) {
+  requireAmount(value, `${label} must be a number of minutes`);
+  const problem = minuteSettingProblem(value, label, MINUTE_BOUNDS[field]);
+  if (problem) throw errors.validationFailed(problem);
   return value;
+}
+
+/** True when all three minute settings sit inside their own range. */
+function hasValidMinuteSettings(restaurant) {
+  return Object.keys(MINUTE_BOUNDS).every(
+    (field) => minuteSettingProblem(restaurant[field], field, MINUTE_BOUNDS[field]) === null,
+  );
 }
 
 function normalizeOpeningHours(raw, label) {
@@ -133,9 +165,9 @@ function normalizeRestaurants(raw) {
       id,
       name: obj.name === undefined || obj.name === null ? id : obj.name,
       timezone: obj.timezone,
-      slot_minutes: requireSlot(obj.slot_minutes, `restaurant ${id} slot_minutes`),
-      reservation_duration_minutes: requireSlot(obj.reservation_duration_minutes, `restaurant ${id} reservation_duration_minutes`),
-      cancellation_cutoff_minutes: requireSlot(obj.cancellation_cutoff_minutes, `restaurant ${id} cancellation_cutoff_minutes`),
+      slot_minutes: requireMinuteSetting(obj.slot_minutes, 'slot_minutes', `restaurant ${id} slot_minutes`),
+      reservation_duration_minutes: requireMinuteSetting(obj.reservation_duration_minutes, 'reservation_duration_minutes', `restaurant ${id} reservation_duration_minutes`),
+      cancellation_cutoff_minutes: requireMinuteSetting(obj.cancellation_cutoff_minutes, 'cancellation_cutoff_minutes', `restaurant ${id} cancellation_cutoff_minutes`),
       opening_hours: normalizeOpeningHours(obj.opening_hours, `restaurant ${id}`),
       tables: normalizeTables(obj.tables, `restaurant ${id}`),
     };
@@ -183,7 +215,9 @@ module.exports = {
   receiptKey,
   getState,
   index,
-  requireSlot,
+  requireMinuteSetting,
+  hasValidMinuteSettings,
+  MINUTE_BOUNDS,
   REFERENCE_PATTERN,
   normalizeRestaurants,
   normalizeOpeningHours,
