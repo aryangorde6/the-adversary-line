@@ -189,17 +189,21 @@ function resolveTarget(restaurant, tableId, startsAtLocalText, partySize) {
       .filter((r) => r.open && r.close);
     throw errors.outsideOpeningHours(`${name} is open ${openingWords(todays)} on ${dayWords(fields)}, and ${startWords(fields)} is outside those hours.`);
   }
-  const onGrid = inHours.filter((r) => (minutes - r.openMinutes) % restaurant.slot_minutes === 0);
-  if (onGrid.length === 0) {
-    const first = inHours[0];
-    throw errors.notOnSlotGrid(`${startWords(fields)} is not one of the start times ${name} offers; ${name} takes bookings every ${T.minutesWords(restaurant.slot_minutes)} from ${T.timeWords(first.open.hour, first.open.minute)}.`);
-  }
-  const closing = onGrid.find((r) => minutes + restaurant.reservation_duration_minutes > r.closeMinutes);
+  /* Containment first, as one rule: a start must fall inside an open window and
+   * the booking must finish before that window closes. Whichever half fails is
+   * outside_opening_hours whatever the slot grid says, so the grid is only ever
+   * consulted for a start that is genuinely inside the open window. */
+  const closing = inHours.find((r) => minutes + restaurant.reservation_duration_minutes > r.closeMinutes);
   if (closing) {
     const endMinutes = minutes + restaurant.reservation_duration_minutes;
     const nextDay = endMinutes >= 1440;
     const endText = `${T.timeWords(Math.floor((endMinutes % 1440) / 60), endMinutes % 60)}${nextDay ? ' the next day' : ''}`;
     throw errors.outsideOpeningHours(`A ${T.minutesAdjective(restaurant.reservation_duration_minutes)} booking from ${startWords(fields)} would end at ${endText}, after ${name} closes at ${T.timeWords(closing.close.hour, closing.close.minute)}.`);
+  }
+  const onGrid = inHours.filter((r) => (minutes - r.openMinutes) % restaurant.slot_minutes === 0);
+  if (onGrid.length === 0) {
+    const first = inHours[0];
+    throw errors.notOnSlotGrid(`${startWords(fields)} is not one of the start times ${name} offers; ${name} takes bookings every ${T.minutesWords(restaurant.slot_minutes)} from ${T.timeWords(first.open.hour, first.open.minute)}.`);
   }
 
   if (partySize > table.capacity) {
