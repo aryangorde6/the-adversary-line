@@ -16,6 +16,7 @@ const GROUPS = [
   './delivery.mjs',
   './delta.mjs',
   './open-questions.mjs',
+  './rulings.mjs',
 ];
 
 for (const path of GROUPS) {
