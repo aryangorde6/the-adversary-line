@@ -217,6 +217,22 @@ function parseLocalMinute(text) {
   };
 }
 
+/**
+ * True when text is a bare local `YYYY-MM-DDTHH:MM` naming a real calendar date
+ * and a real time of day. This is deliberately a format and calendar question
+ * only: it never resolves the minute against a zone, so a local time inside a
+ * spring-forward gap still answers true here. Whether that minute exists at a
+ * particular restaurant is a runtime question for the booking path, and a state
+ * that legitimately stores one must stay importable.
+ */
+function isRealLocalMinute(text) {
+  const f = parseLocalMinute(text);
+  if (!f) return false;
+  if (!isCalendarDate(f.year, f.month, f.day)) return false;
+  if (f.hour > 23 || f.minute > 59) return false;
+  return true;
+}
+
 function parseDate(text) {
   if (typeof text !== 'string') return null;
   const m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(text);
@@ -262,6 +278,7 @@ module.exports = {
   minutesAdjective,
   minutesOfDay,
   parseLocalMinute,
+  isRealLocalMinute,
   parseDate,
   parseTimeOfDay,
 };

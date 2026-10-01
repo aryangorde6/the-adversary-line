@@ -3,6 +3,7 @@
 const { errors } = require('./errors');
 const M = require('./model');
 const S = require('./store');
+const T = require('./time');
 const { setState } = require('./service');
 
 const TRACK = 'tablekeeper';
@@ -73,6 +74,7 @@ function validateReservation(r) {
     && r.party_size >= 1
     && (r.status === 'confirmed' || r.status === 'cancelled')
     && isNonEmptyString(r.starts_at_local)
+    && T.isRealLocalMinute(r.starts_at_local)
     && isOffsetInstant(r.starts_instant)
     && isOffsetInstant(r.ends_instant)
     && isOffsetInstant(r.created_at);
