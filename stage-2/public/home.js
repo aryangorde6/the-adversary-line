@@ -280,22 +280,25 @@
         capacity: Number(table.capacity) || 0
       });
     });
+    /* Pairs are learned from available_options and nowhere else. The restaurant
+       detail deliberately does not carry combinable, so reading it here would
+       only ever be a second, disagreeing source of truth. available_options
+       already arrives in the order the specification fixes: singles in fixture
+       order, then pairs in combinable order, with table_ids inside a pair in
+       combinable order. Taking the first sighting of each pair preserves that
+       order down the grid. */
     var pairs = [];
-    (state.restaurant.combinable || []).forEach(function (pair) {
-      if (!Array.isArray(pair) || pair.length !== 2) return;
-      pairs.push(pair.slice());
-    });
     (availability.slots || []).forEach(function (slot) {
       (slot.available_options || []).forEach(function (option) {
         if (!Array.isArray(option.table_ids) || option.table_ids.length !== 2) return;
-        var known = pairs.some(function (p) { return p[0] === option.table_ids[0] && p[1] === option.table_ids[1]; });
-        if (!known) pairs.push(option.table_ids.slice());
+        var ids = option.table_ids.slice();
+        var key = JSON.stringify(ids);
+        if (seen[key]) return;
+        seen[key] = true;
+        pairs.push(ids);
       });
     });
     pairs.forEach(function (pair) {
-      var key = JSON.stringify(pair);
-      if (seen[key]) return;
-      seen[key] = true;
       var labels = labelsFor(pair);
       var capacity = pair.reduce(function (sum, id) {
         var table = tableById(id);
