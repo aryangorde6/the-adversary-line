@@ -39,28 +39,59 @@ export default async function run() {
   }
   record('R1', party.every((line) => / 422 /.test(line)), party.join('; '));
 
-  // R2 starts_at_local: wrong JSON type 400, string that is not a bare local 422
+  // R2 starts_at_local: a wrong JSON type other than null is 400, null is a missing field
   const starts = [];
-  for (const value of [20261210, true, null, {}, []]) {
+  const startCases = [
+    [20261210, 400], [true, 400], [{}, 400], [[], 400],
+    [null, 422], ['not a date', 422], ['2026-12-10T19:00:00Z', 422], ['2026-12-10 19:00', 422],
+    ['2026-02-30T19:00', 422], ['2026-12-10T25:00', 422], ['2026-12-10', 422],
+  ];
+  for (const [value, want] of startCases) {
     const res = await resetRaw(seedRaw({ starts_at_local: value }));
-    starts.push(`seeded ${JSON.stringify(value)} ${res.status} ${code(res.text)}`);
+    starts.push({ line: `seeded ${JSON.stringify(value)} ${res.status} ${code(res.text)}`, want });
   }
-  for (const value of ['not a date', '2026-12-10T19:00:00Z', '2026-12-10 19:00', '2026-02-30T19:00', '2026-12-10T25:00', '2026-12-10']) {
-    const res = await resetRaw(seedRaw({ starts_at_local: value }));
-    starts.push(`seeded ${JSON.stringify(value)} ${res.status} ${code(res.text)}`);
-  }
-  record('R2', starts.slice(0, 5).every((l) => / 400 /.test(l)) && starts.slice(5).every((l) => / 422 /.test(l)), starts.join('; '));
+  record('R2', starts.every((entry) => entry.line.includes(` ${entry.want} `)), starts.map((e) => e.line).join('; '));
 
-  // R3 name, label and display_name are strings in section 4, so a number is 400
+  // R3 name, label and display_name are strings in section 4: a number is 400, null is missing
   const coerced = [];
-  coerced.push(`restaurant name ${(await resetRaw(fixture({ restaurants: [restaurant({ name: 7 })] }))).status}`);
-  coerced.push(`table label ${(await resetRaw(fixture({ restaurants: [restaurant({ tables: [table('t_1', 2, 7)] })] }))).status}`);
-  coerced.push(`display_name ${(await resetRaw(fixture({ users: [{ ...fixture().users[0], display_name: 7 }] }))).status}`);
-  await reset(fixture());
-  const tok3 = await login();
-  const amenity = await POST(`/restaurants/${'r_anker'}/amenities`, { token: tok3, body: { name: 7 } }).catch(() => null);
-  coerced.push(`the amenity endpoint exists: ${amenity === null ? 'no' : amenity.status}`);
-  record('R3', coerced.slice(0, 3).every((l) => l.endsWith('400')), coerced.join('; '));
+  const coercedCases = [
+    ['restaurant name', () => fixture({ restaurants: [restaurant({ name: 7 })] }), 400],
+    ['restaurant name', () => fixture({ restaurants: [restaurant({ name: null })] }), 422],
+    ['table label', () => fixture({ restaurants: [restaurant({ tables: [table('t_1', 2, 7)] })] }), 400],
+    ['table label', () => fixture({ restaurants: [restaurant({ tables: [table('t_1', 2, null)] })] }), 422],
+    ['display_name', () => fixture({ users: [{ ...fixture().users[0], display_name: 7 }] }), 400],
+    ['display_name', () => fixture({ users: [{ ...fixture().users[0], display_name: null }] }), 422],
+    ['timezone', () => fixture({ restaurants: [restaurant({ timezone: 7 })] }), 400],
+    ['timezone', () => fixture({ restaurants: [restaurant({ timezone: null })] }), 422],
+    ['email', () => fixture({ users: [{ ...fixture().users[0], email: 7 }] }), 400],
+    ['email absent', () => { const user = { ...fixture().users[0] }; delete user.email; return fixture({ users: [user] }); }, 422],
+    ['weekday', () => fixture({ restaurants: [restaurant({ opening_hours: [{ weekday: 7, opens: '18:00', closes: '23:00' }] })] }), 400],
+    ['weekday absent', () => fixture({ restaurants: [restaurant({ opening_hours: [{ opens: '18:00', closes: '23:00' }] })] }), 422],
+    ['capacity', () => fixture({ restaurants: [restaurant({ tables: [table('t_1', '4')] })] }), 400],
+    ['capacity null', () => fixture({ restaurants: [restaurant({ tables: [table('t_1', null)] })] }), 422],
+    ['table id absent', () => fixture({ restaurants: [restaurant({ tables: [{ capacity: 4 }] })] }), 422],
+    ['party_size null', () => seedRaw({ party_size: null }), 422],
+  ];
+  for (const [label, build, want] of coercedCases) {
+    const res = await resetRaw(build());
+    coerced.push({ line: `${label} ${res.status} ${code(res.text)}`, want });
+  }
+  record('R3', coerced.every((entry) => entry.line.includes(` ${entry.want} `)), coerced.map((e) => e.line).join('; '));
+
+  // R5 an optional field that is absent or null is accepted as absent, not a missing-field error
+  const optional = [];
+  const optionalCases = [
+    ['reservation id absent', { id: undefined }],
+    ['reservation id null', { id: null }],
+    ['reservation id a string', { id: 'res_custom' }],
+  ];
+  for (const [label, over] of optionalCases) {
+    const body = seedRaw(over);
+    if (over.id === undefined) delete body.reservations[0].id;
+    const res = await resetRaw(body);
+    optional.push({ line: `${label} ${res.status} ${code(res.text)}`, want: 204 });
+  }
+  record('R5', optional.every((entry) => entry.line.includes(' 204 ')), optional.map((e) => e.line).join('; '));
 
   // R4 right-type bad values stay 422, unknown fields stay ignored
   const kept = [];
@@ -96,8 +127,37 @@ export default async function run() {
   const state2 = JSON.parse(JSON.stringify(await exportState()));
   state2.state.restaurants[0].cancellation_cutoff_minutes = 0;
   const viaImport = await importState(state2);
+  const overBounds = [];
+  for (const value of [10081, 604800]) {
+    const res = await resetRaw(fixture({ restaurants: [restaurant({ cancellation_cutoff_minutes: value })] }));
+    overBounds.push(`${value} -> ${res.status}`);
+  }
   record('Q1', cutoffZero.status === 204 && cutoffString.status === 400 && cutoffNegative.status === 422 && cutoffHuge.status === 204 && viaImport.status === 204,
-    `cutoff 0 through reset -> ${cutoffZero.status} ${code(cutoffZero.text)}; the string "0" -> ${cutoffString.status} ${code(cutoffString.text)}; -1 -> ${cutoffNegative.status} ${code(cutoffNegative.text)}; 10080 -> ${cutoffHuge.status}; the same 0 through /_test/import -> ${viaImport.status} ${code(viaImport.text)}`);
+    `cutoff 0 through reset -> ${cutoffZero.status} ${code(cutoffZero.text)}; the string "0" -> ${cutoffString.status} ${code(cutoffString.text)}; -1 -> ${cutoffNegative.status} ${code(cutoffNegative.text)}; 10080 -> ${cutoffHuge.status}; the same 0 through /_test/import -> ${viaImport.status} ${code(viaImport.text)}; above the range, recorded not asserted: ${overBounds.join(', ')}`);
+
+  // Q3 the F3 boundary: format and calendar reality are checked, resolvability is not
+  const gapState = async (value) => {
+    await reset(fixture());
+    const token = await login();
+    const held = await book(token, { table_id: 't_2', starts_at_local: `${D_THU_FUTURE}T19:00`, party_size: 4, key: `q3-${value}` });
+    const payload = JSON.parse(JSON.stringify(await exportState()));
+    payload.state.reservations[0].starts_at_local = value;
+    const res = await importState(payload);
+    const after = await exportState();
+    return { res, after, held, token, ok: after.state.reservations[0].starts_at_local === value };
+  };
+  const gap = await gapState('2026-03-29T02:30');
+  record('Q3.gap-time-importable', gap.res.status === 204 && gap.ok,
+    `a well-formed local time inside the Berlin spring-forward gap, 2026-03-29T02:30 -> import ${gap.res.status} ${code(gap.res.text)}, and the destination holds ${gap.after.state.reservations[0].starts_at_local}; the booking path refuses the same minute with 422 invalid_local_time (T12)`);
+  const fold = await gapState('2026-10-25T02:30');
+  record('Q3.fold-time-importable', fold.res.status === 204 && fold.ok,
+    `a well-formed local time inside the Berlin fall-back hour, 2026-10-25T02:30 -> import ${fold.res.status} ${code(fold.res.text)}, and the destination holds ${fold.after.state.reservations[0].starts_at_local}`);
+  const calendar = [];
+  for (const value of ['2026-02-30T19:00', '2026-13-01T19:00', '2026-12-10T24:00', '2026-12-10T19:60', 'not a date', '2026-12-10T19:00:00Z', '2026-12-10 19:00']) {
+    const attempt = await gapState(value);
+    calendar.push({ line: `${value} -> ${attempt.res.status} ${code(attempt.res.text)}, the destination still holds ${attempt.after.state.reservations[0].starts_at_local}`, ok: attempt.res.status === 422 && attempt.after.state.reservations[0].starts_at_local === `${D_THU_FUTURE}T19:00` });
+  }
+  record('Q3.calendar-refused', calendar.every((entry) => entry.ok), calendar.map((e) => e.line).join('; '));
 }
 
 function code(text) {
