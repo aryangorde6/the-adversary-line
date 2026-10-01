@@ -28,7 +28,11 @@ export default async function run() {
     ['fixture users is a string', '{"users": "ada"}'],
     ['fixture reservations is a number', '{"reservations": 3}'],
     ['fixture restaurant is not an object', '{"restaurants": [7]}'],
-    ['fixture tables is a number', '{"restaurants": [{"id":"r_a","timezone":"Europe/Berlin","slot_minutes":30,"reservation_duration_minutes":90,"cancellation_cutoff_minutes":60,"tables": 7}]}'],
+    /* A name is supplied here on purpose. The row is about tables being a number
+     * rather than an array, and section 4 types the name as a required string, so
+     * a fixture without one is refused for the missing name before the wrong type
+     * is ever reached and the row would be deciding a different field. */
+    ['fixture tables is a number', '{"restaurants": [{"id":"r_a","name":"Second","timezone":"Europe/Berlin","slot_minutes":30,"reservation_duration_minutes":90,"cancellation_cutoff_minutes":60,"tables": 7}]}'],
   ]) {
     const res = await call('POST', '/_test/reset', { rawBody: raw });
     malformed.push([label, res, 400, 'malformed_request']);

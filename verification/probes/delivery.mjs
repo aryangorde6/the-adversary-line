@@ -133,9 +133,12 @@ export default async function run() {
     record('D12', outbound === 'blocked' && hasNoNet, `the run-time container has no network attached (${networks.slice(0, 60)}...) and an outbound fetch is ${outbound}`);
     record('D14', up.status === 200 && Number(slotCount) > 0 && outbound === 'blocked', `every asset the service needs came out of the image: ${slotCount} slots served with the network cut and an outbound fetch ${outbound}`);
 
-    // D7 and D8 the suite itself runs under the stated limits
-    const primary = sh("docker ps --format '{{.Names}} {{.Status}}' | grep -E '^tk-adv ' || true").trim();
-    const limits = sh("docker inspect -f '{{.HostConfig.NanoCpus}} {{.HostConfig.Memory}}' tk-adv").trim().split(/\s+/);
+    /* D7 and D8 the suite itself runs under the stated limits. The rows are
+     * about how the instance under test was started, so its name is passed in
+     * TK_PRIMARY rather than assumed; assuming one made both rows undecidable
+     * whenever the instance had been started under a different name. */
+    const primary = process.env.TK_PRIMARY || '';
+    const limits = primary ? sh(`docker inspect -f '{{.HostConfig.NanoCpus}} {{.HostConfig.Memory}}' ${primary}`).trim().split(/\s+/) : [];
     const cpus = Number(limits[0]) / 1e9;
     const bytes = Number(limits[1]);
     record('D7', cpus === 2, `the instance the whole probe suite ran against was started with --cpus=2 (${cpus} vCPU, ${primary})`);
