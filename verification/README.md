@@ -25,6 +25,21 @@ nothing here is product code: I never edit the implementation, I only read it an
 5. Read the code afterwards for special cases that satisfy a check rather than the requirement.
 6. Stop every container and process I started, before the turn ends.
 
+## Supplied checks
+
+I never open, read or copy the harness check files. They are run only through the command the room
+owner gave, with a fresh output directory number every time:
+
+```sh
+cd /home/aryan/band_hack/dark-factory-wearedevs && .venv/bin/python -m harness run \
+  --track tablekeeper --repo /home/aryan/band_hack/band-work/tablekeeper \
+  --stage 1 --out /home/aryan/band_hack/band-work/checks/tablekeeper/s1-<new number>
+```
+
+Acceptance runs the same command with `--mode isolated`. For stage 1 a failing suite 2 is expected
+and correct. Only the command's own output and failure messages are read; the probes are written
+from the specification text, never from a check's internals.
+
 A verdict is PASS only when the clean build starts, the supplied checks pass and all 164 rows hold.
 Anything else is BLOCKED, listing each failing row with the requirement, the command, what was
 expected and what happened. A BLOCKED verdict stands until a new commit is reported.

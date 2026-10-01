@@ -262,6 +262,34 @@ Recorded so that a later stage or a defect report cannot turn a permitted behavi
 pass/fail claim: D13 (state need not survive a restart), D17 (not a Python package), D18 (compose
 optional), C3 (non-200 before ready), X16 (export holds credentials), V20 (no batch UI).
 
+## Band invariants (recorded at the room owner's request, 2d3d9ef6)
+
+Six invariants the room owner states as the things the saboteur will attack. They are not extra
+requirements; each is the specification's own wording gathered into one place. `Decided by` lists
+the ledger rows that actually decide it, so a mutant cannot pass by being agreed with in prose.
+
+| id | Invariant (verbatim from the room owner's plan message) | Decided by |
+|---|---|---|
+| INV1 | "Two confirmed reservations never occupy the same table over overlapping half-open intervals, including under 50 concurrent in-flight requests, and no partial state is ever left behind." | P22, P23, P15, D10, P24, P39, V15, V13 |
+| INV2 | "Never a 5xx. Every 4xx uses exactly the status and code named in the specification's error table." | E16, E1, E2, E3, E4, E5, E6, E7, E8, E9, E10, E13, E15, E17 and every row that names a status and code |
+| INV3 | "Idempotency is resolved after body parse and authentication but before any endpoint-specific validation; a replay returns the stored original response verbatim; a key whose original request failed with 4xx stays reusable; keys are scoped per authenticated user." | I4, I12, I9, I2, I7, I10, I11 |
+| INV4 | "`reservation_duration_minutes` is absolute time, not wall clock. A DST fall-back local time resolves to the first occurrence only. A spring-forward gap time is 422 `invalid_local_time`." | T10, T11, T4, T6, T8, T3, T5, T7 |
+| INV5 | "Export and import round-trip accounts, hashed passwords, bearer tokens, references, histories, idempotency receipts and counters without regenerating or duplicating anything." | X10, X11, X13, X14, X6, X12, X9, A9, I11, V19 |
+| INV6 | "A booking is never rejected solely because its start is in the past." | M7, P33, P36 |
+
+Two mappings worth stating, because a mutant could otherwise sit on the gap between the invariant's
+words and the specification's:
+
+- INV5 says "histories" and "counters". The specification's words are "Identities, statuses and
+  timestamps must not be regenerated" (row X11) together with references, tokens and receipts
+  (X10). So `probes/xport/preserve.sh` compares the whole reservation field set and the whole
+  receipt set across an import, field by field, rather than checking a single identifier. Any
+  value that changes across an import fails X11, whichever word the invariant used for it.
+- INV6 says "solely because its start is in the past". A past start is accepted (M7), while the
+  cutoff rules still apply to cancel and patch (P33, P36). Both halves are probed, so a service
+  that accepts past starts by dropping the cutoff rule fails INV6's second clause rather than
+  passing it.
+
 ## Reading the specification against itself
 
 Two points in stage-1.md that a probe must pin down rather than guess, because the text allows
