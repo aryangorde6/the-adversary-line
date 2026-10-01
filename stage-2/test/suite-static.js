@@ -255,8 +255,20 @@ exports.run = async () => {
     L.assert.deepEqual([...ST.CONTENT_TYPES.keys()].sort(),
       ['.css', '.html', '.js', '.png', '.svg'],
       'nothing else is served');
+    /* The registered media types, not approximations of them. A PNG served as
+     * text/png is refused by every browser, so the map names what each type is
+     * actually called. */
+    L.assert.deepEqual([...ST.CONTENT_TYPES.entries()].sort(),
+      [
+        ['.css', 'text/css; charset=utf-8'],
+        ['.html', 'text/html; charset=utf-8'],
+        ['.js', 'text/javascript; charset=utf-8'],
+        ['.png', 'image/png'],
+        ['.svg', 'image/svg+xml'],
+      ],
+      'every served type is its registered media type');
     L.assert.equal(ST.contentTypeFor('a.HTML'), 'text/html; charset=utf-8', 'the extension is matched case-insensitively');
-    L.assert.equal(ST.contentTypeFor('a.PnG'), 'text/png', 'and so is a mixed-case png');
+    L.assert.equal(ST.contentTypeFor('a.PnG'), 'image/png', 'and so is a mixed-case png');
     L.assert.equal(ST.contentTypeFor('a.gif'), null, 'an unserved extension has no content type');
     L.assert.equal(ST.contentTypeFor('noextension'), null, 'and neither has a bare name');
   });
