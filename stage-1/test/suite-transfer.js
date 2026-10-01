@@ -3,6 +3,27 @@
 const L = require('./lib');
 const clock = require('./clock');
 
+/** An export snapshot cannot be replayed through /_test/reset as it stands: the
+ * envelope carries password_hash and a numeric created_at, and the fixture door
+ * carries a plaintext password and the documented fields only. This rebuilds the
+ * fixture-shaped input from a snapshot — the stored restaurants verbatim, and each
+ * stored reservation projected onto the fields stage-1 section 4 names for a seeded
+ * booking, so the comparison is between the two doors and not between their shapes. */
+function seededFrom(snapshot) {
+  const stored = snapshot.state || snapshot;
+  const copy = (value) => JSON.parse(JSON.stringify(value || []));
+  const seededFields = ['id', 'reference', 'user_id', 'restaurant_id', 'table_id', 'party_size', 'status', 'starts_at_local'];
+  return {
+    users: copy(L.FIXTURE.users),
+    restaurants: copy(stored.restaurants),
+    reservations: copy(stored.reservations).map((r) => {
+      const out = {};
+      for (const field of seededFields) if (r[field] !== undefined) out[field] = r[field];
+      return out;
+    }),
+  };
+}
+
 exports.run = async () => {
   await L.step('export returns the documented envelope', async () => {
     await L.reset(clock.alwaysOpen(L.FIXTURE, { cancellation_cutoff_minutes: 30 }));
@@ -220,6 +241,68 @@ exports.run = async () => {
     L.assert.equal((await L.call('POST', '/_test/import', { body: gap })).status, 204, 'a gap local time imports');
     const still = (await L.call('GET', '/_test/export')).json;
     L.assert.equal(still.state.reservations[0].starts_at_local, '2026-03-29T02:30', 'a gap local time survives the round trip');
+  });
+
+  /* One identical value through both doors, compared rather than asserted twice:
+   * the two test endpoints must agree about the shape and calendar reality of a
+   * stored local start time. This is the pair that caught reset answering 422
+   * for a value import happily installed.
+   *
+   * The one thing they deliberately do not share is resolvability. A seeded
+   * booking has to be given an instant, so a time inside a DST spring-forward
+   * gap has no instant to give and seeding it is refused; an imported record
+   * carries its instants in the envelope already, and section F3 says a
+   * well-formed local time must import even when it falls in a gap. That
+   * asymmetry is a difference in what each door is asked to do, so it is
+   * asserted as its own fact below rather than folded into this comparison. */
+  await L.step('reset and import agree on the shape of a stored local start time', async () => {
+    for (const [text, valid] of [
+      ['2026-09-24T19:00', true],
+      ['2026-02-30T19:00', false],
+      ['2026-13-01T19:00', false],
+      ['2026-12-10T19:60', false],
+      ['2026-12-10T24:00', false],
+      ['2026-12-10T19:00:00Z', false],
+      ['2026-12-10 19:00', false],
+      ['2026-12-10T9:00', false],
+      ['2026-1-10T19:00', false],
+      ['not a date', false],
+      ['2026-12-10T19:00 ', false],
+    ]) {
+      const snapshot = await L.call('GET', '/_test/export');
+      L.assert.equal(snapshot.status, 200, snapshot.text);
+      const viaImport = JSON.parse(JSON.stringify(snapshot.json));
+      await L.reset(L.FIXTURE);
+      const token = await L.login('ada@example.com', 'correct horse');
+      const booked = await L.call('POST', '/reservations', {
+        token,
+        key: 'pair',
+        body: { restaurant_id: 'r_anker', table_id: 't_1', starts_at_local: '2026-09-24T19:00', party_size: 2 },
+      });
+      L.assert.equal(booked.status, 201, booked.text);
+      const live = JSON.parse(JSON.stringify((await L.call('GET', '/_test/export')).json));
+      viaImport.state.reservations[0].starts_at_local = text;
+      live.state.reservations[0].starts_at_local = text;
+      const imported = await L.call('POST', '/_test/import', { body: viaImport });
+      const reseeded = await L.call('POST', '/_test/reset', { body: seededFrom(live) });
+
+      const sameVerdict = valid
+        ? imported.status === 204 && reseeded.status === 204
+        : imported.status === 422 && reseeded.status === 422;
+      L.assert.equal(sameVerdict, true, `${JSON.stringify(text)} answers ${imported.status} through import and ${reseeded.status} ${reseeded.text.slice(0, 140)} through reset`);
+    }
+  });
+
+  /* The asymmetry the previous step deliberately leaves out, pinned so that it
+   * reads as a decision about resolvability rather than as an oversight. */
+  await L.step('a gap local time imports but cannot be seeded', async () => {
+    const live = JSON.parse(JSON.stringify((await L.call('GET', '/_test/export')).json));
+    const seeded = await L.call('POST', '/_test/reset', {
+      body: seededFrom({ state: { reservations: [{ ...live.state.reservations[0], starts_at_local: '2026-03-29T02:30' }] } }),
+    });
+    L.assert.equal(seeded.status, 422, `seeding a gap time is refused: ${seeded.text}`);
+    const imported = await L.call('POST', '/_test/import', { body: { ...live, state: { ...live.state, reservations: [{ ...live.state.reservations[0], starts_at_local: '2026-03-29T02:30' }] } } });
+    L.assert.equal(imported.status, 204, `importing the same gap time is allowed: ${imported.text}`);
   });
 
   /* The import path must not be able to install a minute setting the fixture
