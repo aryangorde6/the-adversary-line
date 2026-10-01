@@ -1,0 +1,112 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Tablekeeper — find a table</title>
+<meta name="description" content="Search a restaurant's tables by day, time and party size, then book the one you want.">
+<link rel="stylesheet" href="/styles.css">
+</head>
+<body>
+<a class="skip-link" href="#main">Skip to the main content</a>
+<header class="topbar">
+  <div class="wrap topbar__inner">
+    <a class="brand" href="/">
+      <span class="brand__mark" aria-hidden="true">Tk</span>
+      <span>
+        <span class="brand__name">Tablekeeper</span>
+        <span class="brand__tag">Tables worth keeping</span>
+      </span>
+    </a>
+    <nav class="mainnav" aria-label="Main">
+      <a href="/">Find a table</a>
+      <a href="/lookup">My booking</a>
+    </nav>
+    <div class="session" data-testid="session-slot"></div>
+  </div>
+</header>
+
+<main id="main" class="wrap page">
+  <div class="page__head">
+    <p class="eyebrow">Tonight&rsquo;s tables</p>
+    <h1>Find a table worth keeping</h1>
+    <p class="lede">Pick a restaurant, a day and how many are coming. Then choose a time from the grid &mdash; nothing is held until you confirm.</p>
+  </div>
+
+  <div id="auth-host" class="stack stack--tight authhost"></div>
+
+  <div class="stack">
+    <section class="panel" aria-labelledby="search-title">
+      <div class="panel__head">
+        <h2 class="panel__title" id="search-title">Search for a table</h2>
+        <p class="panel__note">Times are the restaurant&rsquo;s own local times.</p>
+      </div>
+      <form class="searchgrid" id="search-form" novalidate>
+        <div class="field searchgrid__wide">
+          <label class="field__label" for="restaurant-select">Restaurant</label>
+          <select id="restaurant-select" data-testid="restaurant-select"></select>
+        </div>
+        <div class="field">
+          <label class="field__label" for="date-input">Date</label>
+          <input type="date" id="date-input" data-testid="date-input" autocomplete="off">
+        </div>
+        <div class="field">
+          <label class="field__label" for="party-size-input">Guests</label>
+          <input type="number" id="party-size-input" data-testid="party-size-input" min="1" step="1" inputmode="numeric" value="2">
+        </div>
+        <div class="field searchgrid__actions">
+          <button class="btn btn--primary" type="submit" data-testid="search-button">
+            <span class="btn__label">Show times</span>
+          </button>
+        </div>
+      </form>
+      <div id="search-messages" class="stack stack--tight searchgrid__messages"></div>
+    </section>
+
+    <div class="split split--results" id="results">
+      <section class="panel panel--flat gridpanel" aria-labelledby="grid-title">
+        <div class="panel__head">
+          <h2 class="panel__title" id="grid-title">Availability</h2>
+          <p class="panel__note" id="grid-note"></p>
+        </div>
+        <div id="grid-host"></div>
+      </section>
+
+      <div class="stack">
+        <section class="panel booking" data-testid="booking-form" hidden aria-labelledby="booking-title">
+          <div class="panel__head">
+            <h2 class="panel__title" id="booking-title">Book this table</h2>
+          </div>
+          <p class="booking__summary" data-testid="booking-summary"></p>
+          <div id="booking-messages" class="stack stack--tight booking__messages"></div>
+          <form class="booking__body" id="booking-form-inner" novalidate>
+            <div class="field booking__party">
+              <label class="field__label" for="booking-party-size">Guests</label>
+              <input type="number" id="booking-party-size" data-testid="booking-party-size" min="1" step="1" inputmode="numeric" required>
+              <p class="field__hint" id="booking-capacity"></p>
+            </div>
+            <div class="actions">
+              <button class="btn btn--primary" type="submit" data-testid="booking-submit">
+                <span class="btn__label">Confirm booking</span>
+              </button>
+              <button class="btn btn--plain" type="button" id="booking-clear">Choose another table</button>
+            </div>
+          </form>
+        </section>
+        <div id="confirmation-host"></div>
+      </div>
+    </div>
+  </div>
+</main>
+
+<footer class="foot">
+  <div class="wrap foot__inner">
+    <p>Tablekeeper &mdash; every table in one place.</p>
+    <p>A booking is only made when you confirm it.</p>
+  </div>
+</footer>
+
+<script src="/app.js"></script>
+<script src="/home.js"></script>
+</body>
+</html>
