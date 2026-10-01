@@ -8,6 +8,12 @@ every "must", every "never", every table row, every stated error and every limit
 when a supplied check already decides it. A row with no probe is a row I have not decided and
 therefore cannot pass.
 
+**On the `.sh` names below.** Each `Check` cell ends in a descriptive `probes/<area>/<name>.sh`
+that never became a file; the probe that decides the row is the node group that `run-all.mjs`
+imports, named alongside it where the mapping is worth stating. The paths are kept as the row's
+original intent so the ledger still reads against the specification, but nothing decides a row by
+being read here: only `run-all.mjs` output does.
+
 Written before any product code existed (see the commit history: the ledger commit precedes the
 first stage-1 commit), so no row can have been shaped by an implementation.
 
@@ -105,6 +111,9 @@ Row counts by group:
 | E14 | "Reserve 400 `malformed_request` for a body that does not parse or a field of the wrong type." | `probes/errors/malformed.sh` — same rows as E3; this row fails if a wrong-type field anywhere answers with another code. |
 | E15 | "`Idempotency-Key` \| 1 to 255 characters \| 422 `validation_failed`" | `probes/errors/key_length.sh` — empty is 400 E4; 256 characters is 422; 1 and 255 are accepted. |
 | E16 | "Requests must not produce 5xx responses, including under concurrent load." | `probes/concurrency/no_5xx.sh` — every response recorded by the whole suite is asserted to be < 500, and again under 50-way load. |
+| E16b | E16 over a deliberate repeat sweep rather than only the responses the rest of the suite happens to produce: every route in the ledger called 300 times, none answering 500 or above. | `probes/sweep.mjs` — 27 routes x 300 calls, every status recorded. |
+| E16c | Each route produces the status the ledger documents for it at least once across its 300 repeats, so the sweep cannot pass on a route that has stopped answering its documented status altogether. A route's repeats legitimately span statuses (the create route answers 201 then 409 once its slots fill), so the set is recorded per route rather than asserted equal. | `probes/sweep.mjs` — status set observed per route across its 300 calls. |
+| E1b | E1 holds across the whole 300-call sweep, not only across the paths the main suite walks: every non-2xx answer is exactly `{error:{code,message}}` with both values strings. | `probes/sweep.mjs` — body shape checked on every non-2xx answer in the sweep. |
 | E17 | "Endpoint-specific field rules take precedence: … Other wrong JSON types follow the rule below." | `probes/errors/type_precedence.sh` — a wrong-typed `party_size`/`starts_at_local` answers `validation_failed`, while a wrong-typed unknown field answers `malformed_request` per E3. |
 
 ## A — Authentication and accounts
