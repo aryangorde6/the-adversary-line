@@ -174,6 +174,95 @@ exports.run = async () => {
     L.assert.deepEqual(after, before, 'a rejected import must change nothing');
   });
 
+  /* A reservation's local start time must name a real calendar date and a real
+   * time of day. That is a format and calendar question, not a resolvability one:
+   * a local time inside a spring-forward gap is still a well formed local time,
+   * so a state that legitimately stores one stays importable. */
+  await L.step('an import refuses a local start time that cannot exist, and accepts a gap time', async () => {
+    await L.reset(L.FIXTURE);
+    const token = await L.login('ada@example.com', 'correct horse');
+    const booked = await L.call('POST', '/reservations', {
+      token,
+      key: 'im-1',
+      body: { restaurant_id: 'r_anker', table_id: 't_1', starts_at_local: '2026-09-24T19:00', party_size: 2 },
+    });
+    L.assert.equal(booked.status, 201, booked.text);
+    const good = (await L.call('GET', '/_test/export')).json;
+    const before = (await L.call('GET', '/restaurants')).json;
+    const withLocal = (text) => {
+      const payload = JSON.parse(JSON.stringify(good));
+      payload.state.reservations[0].starts_at_local = text;
+      return payload;
+    };
+    for (const [text, why] of [
+      ['2026-02-30T19:00', 'February 30 is not a date'],
+      ['2026-13-01T19:00', 'there is no month 13'],
+      ['2026-12-10T25:00', 'there is no hour 25'],
+      ['2026-12-10T19:60', 'there is no minute 60'],
+      ['2026-12-10T19:00:00Z', 'a zoned instant is not a bare local time'],
+      ['2026-12-10 19:00', 'a space is not the local separator'],
+      ['not a date', 'not a time at all'],
+      ['2026-12-10', 'no time of day'],
+      ['2026-12-10T24:00', 'a start time of 24:00 is not a time of day'],
+      ['', 'an empty string'],
+    ]) {
+      L.expectError(
+        await L.call('POST', '/_test/import', { body: withLocal(text) }),
+        422, 'validation_failed', `an import carrying ${JSON.stringify(text)}: ${why}`,
+      );
+    }
+    const after = (await L.call('GET', '/restaurants')).json;
+    L.assert.deepEqual(after, before, 'a refused import must leave the destination untouched');
+
+    /* Berlin springs forward on 2026-03-29, so 02:30 does not exist that day. It
+     * is still a well formed local time and must survive an import. */
+    const gap = withLocal('2026-03-29T02:30');
+    L.assert.equal((await L.call('POST', '/_test/import', { body: gap })).status, 204, 'a gap local time imports');
+    const still = (await L.call('GET', '/_test/export')).json;
+    L.assert.equal(still.state.reservations[0].starts_at_local, '2026-03-29T02:30', 'a gap local time survives the round trip');
+  });
+
+  /* The import path must not be able to install a minute setting the fixture
+   * path refuses, or the two halves of the service would disagree about the same
+   * field. */
+  await L.step('an import refuses minute settings the fixture refuses', async () => {
+    await L.reset(L.FIXTURE);
+    const good = (await L.call('GET', '/_test/export')).json;
+    const before = (await L.call('GET', '/restaurants')).json;
+    const withSetting = (field, value) => {
+      const payload = JSON.parse(JSON.stringify(good));
+      payload.state.restaurants[0][field] = value;
+      return payload;
+    };
+    for (const [field, value, why] of [
+      ['slot_minutes', 0, 'a slot step of zero'],
+      ['slot_minutes', -30, 'a negative slot step'],
+      ['slot_minutes', 30.5, 'a fractional slot step'],
+      ['reservation_duration_minutes', 0, 'a zero length reservation'],
+      ['reservation_duration_minutes', -30, 'a negative duration'],
+      ['cancellation_cutoff_minutes', -1, 'a negative cutoff'],
+      ['cancellation_cutoff_minutes', 10081, 'a cutoff past the published maximum'],
+    ]) {
+      L.expectError(
+        await L.call('POST', '/_test/import', { body: withSetting(field, value) }),
+        422, 'validation_failed', `an import carrying ${field}=${value}: ${why}`,
+      );
+    }
+    for (const [field, value] of [
+      ['slot_minutes', 1],
+      ['reservation_duration_minutes', 1],
+      ['cancellation_cutoff_minutes', 0],
+      ['cancellation_cutoff_minutes', 10080],
+    ]) {
+      const payload = withSetting(field, value);
+      L.assert.equal(
+        (await L.call('POST', '/_test/import', { body: payload })).status,
+        204, `an import carrying ${field}=${value} is accepted`,
+      );
+    }
+    L.assert.deepEqual((await L.call('GET', '/restaurants')).json, before, 'the last import succeeded');
+  });
+
   await L.step('reset still clears imported state', async () => {
     await L.reset(L.FIXTURE);
     const snapshot = (await L.call('GET', '/_test/export')).json;

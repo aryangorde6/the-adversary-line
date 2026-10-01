@@ -46,6 +46,15 @@ function localSlotFromNow(offsetMinutes, stepMinutes = 30) {
   return { text: `${dateText}T${String(hour).padStart(2, '0')}:${String(minute).padStart(2, '0')}`, weekday: b.weekday, dateText };
 }
 
+/** The current local minute in the restaurant zone as a bare `YYYY-MM-DDTHH:MM`,
+ *  with no rounding to a slot grid. A booking seeded at this text has already
+ *  started, which is what a probe about the cancellation cutoff needs. */
+function localMinuteNow() {
+  const p = berlinParts(new Date());
+  const dateText = `${String(p.year).padStart(4, '0')}-${String(p.month).padStart(2, '0')}-${String(p.day).padStart(2, '0')}`;
+  return { text: `${dateText}T${String(p.hour).padStart(2, '0')}:${String(p.minute).padStart(2, '0')}`, dateText, weekday: p.weekday };
+}
+
 /**
  * A fixture whose first restaurant is open every day until the end of the day,
  * so any local slot a probe derives from the clock is bookable whatever hour the
@@ -70,4 +79,4 @@ function alwaysOpen(base, overrides = {}) {
   return fixture;
 }
 
-module.exports = { berlinParts, localSlotFromNow, alwaysOpen };
+module.exports = { berlinParts, localSlotFromNow, localMinuteNow, alwaysOpen };

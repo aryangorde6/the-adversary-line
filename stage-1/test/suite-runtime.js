@@ -1,6 +1,7 @@
 'use strict';
 
 const L = require('./lib');
+const clock = require('./clock');
 
 const A = '2026-09-24T19:00';
 
@@ -206,9 +207,9 @@ exports.run = async () => {
     L.assert.equal((await L.call('POST', '/_test/reset', { body: good })).status, 204);
   });
 
-  await L.step('minute settings accept any positive whole number', async () => {
+  await L.step('minute settings take their own ranges, not one shared one', async () => {
     const fixture = JSON.parse(JSON.stringify(L.FIXTURE));
-    fixture.restaurants[0].cancellation_cutoff_minutes = 60 * 24 * 3650;
+    fixture.restaurants[0].cancellation_cutoff_minutes = 10080;
     fixture.restaurants[0].slot_minutes = 1;
     fixture.restaurants[0].reservation_duration_minutes = 15;
     const reset = await L.call('POST', '/_test/reset', { body: fixture });
@@ -235,6 +236,78 @@ exports.run = async () => {
     L.expectError(
       await L.call('POST', '/_test/reset', { body: fractional }),
       422, 'validation_failed', 'fractional duration',
+    );
+    const zeroDuration = JSON.parse(JSON.stringify(L.FIXTURE));
+    zeroDuration.restaurants[0].reservation_duration_minutes = 0;
+    L.expectError(
+      await L.call('POST', '/_test/reset', { body: zeroDuration }),
+      422, 'validation_failed', 'a zero length reservation is degenerate',
+    );
+  });
+
+  /* The three minute settings deliberately do not share a range. slot_minutes and
+   * reservation_duration_minutes start at 1; cancellation_cutoff_minutes starts at
+   * 0, because a zero cutoff is a real policy rather than a missing value, and it
+   * is capped at the range a later stage publishes for the same field. */
+  await L.step('a cutoff of zero is a policy, not a missing value', async () => {
+    for (const cutoff of [0, 1, 10080]) {
+      const fixture = clock.alwaysOpen(L.FIXTURE, { cancellation_cutoff_minutes: cutoff });
+      const reset = await L.call('POST', '/_test/reset', { body: fixture });
+      L.assert.equal(reset.status, 204, `a cutoff of ${cutoff} is accepted`);
+    }
+    for (const cutoff of [-1, 10081]) {
+      const fixture = clock.alwaysOpen(L.FIXTURE, { cancellation_cutoff_minutes: cutoff });
+      L.expectError(
+        await L.call('POST', '/_test/reset', { body: fixture }),
+        422, 'validation_failed',
+        cutoff < 0 ? `a cutoff of ${cutoff} is a negative count` : `a cutoff of ${cutoff} exceeds the published maximum`,
+      );
+    }
+  });
+
+  /* A zero cutoff is only meaningful if the arithmetic it implies is right. The
+   * protected window is zero minutes wide, so a booking that has not started yet
+   * is still cancellable and only a booking at or past its start is refused. */
+  await L.step('a cutoff of zero refuses only a booking at or past its start', async () => {
+    const fixture = clock.alwaysOpen(L.FIXTURE, { cancellation_cutoff_minutes: 0 });
+    await L.reset(fixture);
+    const token = await L.login('ada@example.com', 'correct horse');
+    const soon = clock.localSlotFromNow(60);
+    const starts = await L.call('POST', '/reservations', {
+      token,
+      key: 'z-soon',
+      body: { restaurant_id: 'r_anker', table_id: 't_1', starts_at_local: soon.text, party_size: 2 },
+    });
+    L.assert.equal(starts.status, 201, starts.text);
+    const cancelled = await L.call('POST', `/reservations/${starts.json.reference}/cancel`, { token });
+    L.assert.equal(cancelled.status, 200, 'a booking an hour out is cancellable under a zero cutoff');
+    L.assert.equal(cancelled.json.status, 'cancelled', cancelled.text);
+    const past = clock.localSlotFromNow(-60);
+    const started = await L.call('POST', '/reservations', {
+      token,
+      key: 'z-past',
+      body: { restaurant_id: 'r_anker', table_id: 't_2', starts_at_local: past.text, party_size: 2 },
+    });
+    L.assert.equal(started.status, 201, started.text);
+    L.expectError(
+      await L.call('POST', `/reservations/${started.json.reference}/cancel`, { token }),
+      409, 'cutoff_passed', 'a booking that already started is refused',
+    );
+    /* A booking cannot be booked for the current minute, because the booking path
+     * only offers grid points and those are in the future. It can be seeded, so
+     * that is how the exact boundary is reached. */
+    const now = clock.localMinuteNow();
+    const seeded = clock.alwaysOpen(L.FIXTURE, { cancellation_cutoff_minutes: 0 });
+    seeded.reservations = [{
+      id: 'res_now', reference: 'NOW0001', user_id: 'u_ada', restaurant_id: 'r_anker',
+      table_id: 't_1', party_size: 2, starts_at_local: now.text,
+    }];
+    const put = await L.call('POST', '/_test/reset', { body: seeded });
+    L.assert.equal(put.status, 204, put.text);
+    const at = await L.login('ada@example.com', 'correct horse');
+    L.expectError(
+      await L.call('POST', '/reservations/NOW0001/cancel', { token: at }),
+      409, 'cutoff_passed', 'a booking starting exactly now is refused',
     );
   });
 

@@ -93,6 +93,35 @@ exports.run = async () => {
     L.expectError(await book(t, 'b-g2', { starts_at_local: `${D}T19:45` }), 422, 'not_on_slot_grid', '19:45');
   });
 
+  /* Containment is one rule and it is evaluated before the grid: a start that is
+   * inside the open window but whose booking would finish after closing is
+   * outside_opening_hours whatever the grid says. The grid is only reached by a
+   * start that genuinely fits inside the window. Both halves are pinned here so
+   * the two 422 codes cannot trade places again. */
+  await L.step('containment is decided before the slot grid', async () => {
+    const t = await future({ slot_minutes: 15, reservation_duration_minutes: 90 });
+    const late = await L.call('GET', '/availability?restaurant_id=r_anker&date=2026-09-24&party_size=2');
+    L.assert.equal(late.status, 200, late.text);
+    for (const start of ['23:07', '23:20']) {
+      L.expectError(
+        await book(t, `b-p${start.slice(0, 2)}`, { starts_at_local: `${D}T${start}` }),
+        422, 'outside_opening_hours',
+        `${start} is off the grid and would finish after closing, so containment answers first`,
+      );
+    }
+    for (const start of ['22:07', '22:20']) {
+      L.expectError(
+        await book(t, `b-g${start.slice(3, 5)}`, { starts_at_local: `${D}T${start}` }),
+        422, 'not_on_slot_grid',
+        `${start} fits inside the window, so only the grid can refuse it`,
+      );
+    }
+    const lastFit = await book(t, 'b-last', { starts_at_local: `${D}T22:30` });
+    L.assert.equal(lastFit.status, 201, 'a booking finishing exactly at closing is still accepted');
+    const noRoom = await book(t, 'b-t2', { starts_at_local: `${D}T22:30` });
+    L.expectError(noRoom, 409, 'table_unavailable', 'the same slot cannot be taken twice');
+  });
+
   await L.step('a closed day, an early start and a late finish are 422 outside_opening_hours', async () => {
     await L.reset(L.FIXTURE);
     const t = await L.login('ada@example.com', 'correct horse');
