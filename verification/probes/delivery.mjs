@@ -53,18 +53,21 @@ export default async function run() {
     const runName = track('tk-adv-runmd');
     let runOk = false;
     let runHealth = 0;
+    let runError = '';
     if (runSeg) {
+      /* --name has to sit before the image name, or docker passes it to the
+       * container as an argument instead of naming it. */
       const runCmd = runSeg.replace(/\btablekeeper\b/g, IMAGE)
+        .replace(/\bdocker run\b/, `docker run --name ${runName}`)
         .replace(/--rm\b/, '')
-        .replace(/-p\s+\S+/, '-p 18081:8080')
-        .concat(` --name ${runName}`);
+        .replace(/-p\s+\S+/, '-p 18081:8080');
       let started = true;
-      try { sh(runCmd); } catch { started = false; }
+      try { sh(runCmd); } catch (error) { started = false; runError = String(error.stderr || error.message).slice(0, 200); }
       if (started) runHealth = (await waitHealthy('http://127.0.0.1:18081')).status;
       runOk = runHealth === 200;
     }
     record('D1', existsSync(RUN_MD) && /build/i.test(runMd) && /run/i.test(runMd) && buildOk && runOk,
-      `RUN.md ${existsSync(RUN_MD) ? 'exists' : 'is missing'}; documented build ${JSON.stringify(buildSeg)} ran from the clone: ${buildOk}; documented start ${JSON.stringify(runSeg)} ran with only the tag and the host port changed, and /health answered ${runHealth}`);
+      `RUN.md ${existsSync(RUN_MD) ? 'exists' : 'is missing'}; documented build ${JSON.stringify(buildSeg)} ran from the clone: ${buildOk}; documented start ${JSON.stringify(runSeg)} ran with only the tag and the host port changed${runError ? ` and failed: ${runError}` : ''}, and /health answered ${runHealth}`);
 
     // D2 and D6 a plain docker build of the stage folder, and the image alone serves everything
     let plainBuild = 'ok';
