@@ -1,0 +1,68 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Look up a booking — Tablekeeper</title>
+<meta name="description" content="Find a Tablekeeper booking with its reference, and cancel it if your plans change.">
+<link rel="stylesheet" href="/styles.css">
+</head>
+<body>
+<a class="skip-link" href="#main">Skip to the main content</a>
+<header class="topbar">
+  <div class="wrap topbar__inner">
+    <a class="brand" href="/">
+      <span class="brand__mark" aria-hidden="true">Tk</span>
+      <span>
+        <span class="brand__name">Tablekeeper</span>
+        <span class="brand__tag">Tables worth keeping</span>
+      </span>
+    </a>
+    <nav class="mainnav" aria-label="Main">
+      <a href="/">Find a table</a>
+      <a href="/lookup">My booking</a>
+    </nav>
+    <div class="session" data-testid="session-slot"></div>
+  </div>
+</header>
+
+<main id="main" class="wrap page">
+  <div class="split--narrow">
+    <div class="page__head">
+      <p class="eyebrow">Already booked?</p>
+      <h1>Look up a booking</h1>
+      <p class="lede">Type the reference from your confirmation and the booking comes back exactly as you left it &mdash; the same tables, the same time.</p>
+    </div>
+
+    <section class="panel" aria-labelledby="lookup-title">
+      <h2 class="visually-hidden" id="lookup-title">Look up a booking</h2>
+      <form class="authform" id="lookup-form" novalidate>
+        <div class="field">
+          <label class="field__label" for="lookup-reference-input">Booking reference</label>
+          <input type="text" id="lookup-reference-input" data-testid="lookup-reference-input"
+                 name="reference" autocomplete="off" spellcheck="false" autocapitalize="characters"
+                 placeholder="Six to twelve letters and numbers" required>
+          <p class="pw-help" id="lookup-reference-help">It is on your confirmation, and it never changes.</p>
+        </div>
+        <div id="lookup-messages" class="stack stack--tight"></div>
+        <button class="btn btn--primary btn--block" type="submit" data-testid="lookup-submit">
+          <span class="btn__label">Find my booking</span>
+        </button>
+      </form>
+
+      <div id="reservation-host" class="stack lookup-host"></div>
+    </section>
+  </div>
+</main>
+
+<footer class="foot">
+  <div class="wrap foot__inner">
+    <p>Tablekeeper &mdash; every table in one place.</p>
+    <p>A booking is only made when you confirm it.</p>
+  </div>
+</footer>
+
+<script src="/app.js"></script>
+<script src="/lookup.js"></script>
+</body>
+</html>

@@ -1,0 +1,69 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Sign in — Tablekeeper</title>
+<meta name="description" content="Sign in to Tablekeeper to book and manage your tables.">
+<link rel="stylesheet" href="/styles.css">
+</head>
+<body>
+<a class="skip-link" href="#main">Skip to the main content</a>
+<header class="topbar">
+  <div class="wrap topbar__inner">
+    <a class="brand" href="/">
+      <span class="brand__mark" aria-hidden="true">Tk</span>
+      <span>
+        <span class="brand__name">Tablekeeper</span>
+        <span class="brand__tag">Tables worth keeping</span>
+      </span>
+    </a>
+    <nav class="mainnav" aria-label="Main">
+      <a href="/">Find a table</a>
+      <a href="/lookup">My booking</a>
+    </nav>
+    <div class="session" data-testid="session-slot"></div>
+  </div>
+</header>
+
+<main id="main" class="wrap page">
+  <div class="split--narrow">
+    <div class="page__head">
+      <p class="eyebrow">Welcome back</p>
+      <h1>Sign in</h1>
+      <p class="lede">Sign in to book a table, or to look up a booking you have already made.</p>
+    </div>
+
+    <section class="panel" aria-labelledby="login-title">
+      <h2 class="visually-hidden" id="login-title">Sign in</h2>
+      <div id="session-note" class="stack stack--tight"></div>
+      <form class="authform" id="auth-form" novalidate>
+        <div class="field">
+          <label class="field__label" for="login-email">Email address</label>
+          <input type="email" id="login-email" data-testid="login-email" name="email" autocomplete="email" spellcheck="false" required>
+        </div>
+        <div class="field">
+          <label class="field__label" for="login-password">Password</label>
+          <input type="password" id="login-password" data-testid="login-password" name="password" autocomplete="current-password" required>
+        </div>
+        <div id="auth-messages" class="stack stack--tight"></div>
+        <button class="btn btn--primary btn--block" type="submit" data-testid="login-submit">
+          <span class="btn__label">Sign me in</span>
+        </button>
+      </form>
+      <p class="authform__alt">No account yet? <a href="/signup">Create one</a></p>
+    </section>
+  </div>
+</main>
+
+<footer class="foot">
+  <div class="wrap foot__inner">
+    <p>Tablekeeper &mdash; every table in one place.</p>
+    <p>A booking is only made when you confirm it.</p>
+  </div>
+</footer>
+
+<script src="/app.js"></script>
+<script src="/auth.js"></script>
+</body>
+</html>

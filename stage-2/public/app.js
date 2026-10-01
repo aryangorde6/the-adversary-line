@@ -193,8 +193,8 @@
       text: 'The clocks change that night. Pick another time from the grid.'
     },
     validation_failed: {
-      title: 'Please check that booking',
-      text: 'The number of guests must be a whole number of at least 1, and the time must be one of the times shown.'
+      title: 'Please check what you entered',
+      text: 'One of the details is not right. Have another look and try again.'
     },
     missing_idempotency_key: {
       title: 'We could not finish that booking',
@@ -206,12 +206,14 @@
     }
   };
 
-  function refusal(code, fallbackText) {
-    var known = REFUSALS[code];
-    if (known) return known;
+  /* A screen may hand in its own wording for the codes it can meet, so a diner
+     is never told about a field they cannot see. */
+  function refusal(code, overrides) {
+    if (overrides && overrides[code]) return overrides[code];
+    if (REFUSALS[code]) return REFUSALS[code];
     return {
       title: 'We could not do that',
-      text: fallbackText || 'Please try again.'
+      text: 'Please try again.'
     };
   }
 

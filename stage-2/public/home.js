@@ -10,6 +10,16 @@
   var message = TK.dom.message;
   var T = TK.text;
 
+  /* The booking screen knows exactly which details it asked for, so it can say
+     which one to fix instead of pointing at "a field". */
+  var BOOKING_WORDS = {
+    validation_failed: {
+      title: 'Check the number of guests',
+      text: 'Enter the number of guests as a whole number of at least 1, and keep one of the times shown in the grid.'
+    }
+  };
+
+
   var dom = {
     authHost: document.getElementById('auth-host'),
     form: document.getElementById('search-form'),
@@ -21,19 +31,21 @@
     gridHost: document.getElementById('grid-host'),
     gridTitle: document.getElementById('grid-title'),
     gridNote: document.getElementById('grid-note'),
-    bookingPanel: testid('booking-form'),
-    bookingSummary: testid('booking-summary'),
-    bookingMessages: document.getElementById('booking-messages'),
-    bookingForm: document.getElementById('booking-form-inner'),
-    bookingParty: testid('booking-party-size'),
-    bookingCapacity: document.getElementById('booking-capacity'),
-    bookingSubmit: testid('booking-submit'),
-    bookingClear: document.getElementById('booking-clear'),
+    bookingHost: document.getElementById('booking-host'),
+    bookingPanel: null,
+    bookingSummary: null,
+    bookingMessages: null,
+    bookingForm: null,
+    bookingParty: null,
+    bookingCapacity: null,
+    bookingSubmit: null,
+    bookingClear: null,
     receiptHost: document.getElementById('confirmation-host')
   };
 
   var state = {
     restaurant: null,
+    details: {},
     slots: [],
     date: '',
     partySize: 2,
@@ -164,13 +176,16 @@
      thrown away when its turn comes back, so the screen only ever describes the
      search the diner is waiting for now. */
 
+  /* Restaurant details are cached by id and never assigned to the live screen
+     from here: only runSearch, after its own sequence check, decides which
+     restaurant the page is describing. That is what stops a slow answer for one
+     restaurant from labelling another one's tables. */
   function ensureRestaurant(id) {
-    if (state.restaurant && state.restaurant.id === id) return Promise.resolve(state.restaurant);
+    if (state.details[id]) return Promise.resolve(state.details[id]);
     return TK.api.get('/restaurants/' + encodeURIComponent(id)).then(function (result) {
-      if (!result.ok || result.lost || !result.data) return null;
-      if (state.restaurant && state.restaurant.id !== id) return null;
-      state.restaurant = result.data;
-      return state.restaurant;
+      if (result.lost || !result.ok || !result.data) return null;
+      state.details[id] = result.data;
+      return result.data;
     });
   }
 
@@ -451,7 +466,10 @@
       'data-testid': cellTestId(row, slot),
       'data-available': isFree ? 'true' : 'false',
       'data-selected': chosen ? 'true' : 'false',
-      'aria-disabled': isFree ? null : 'true',
+      /* Deliberately not aria-disabled: a cell that is not free must still take
+         a click and do nothing, not refuse the click and stall whatever asked.
+         The name below is what tells a screen reader the same thing. */
+      title: isFree ? phrase + ' at ' + clock + ' is free' : phrase + ' at ' + clock + ' is not available',
       'aria-label': phrase + ', ' + clock + ', ' + (isFree ? 'free to book' : 'not available')
     }, [
       el('span', { class: 'cell__time', text: clock }),
@@ -504,8 +522,65 @@
   function dropSelection() {
     state.selection = null;
     state.pending = null;
-    dom.bookingPanel.hidden = true;
-    TK.dom.clear(dom.bookingMessages);
+    TK.dom.clear(dom.bookingHost);
+    dom.bookingPanel = null;
+    dom.bookingSummary = null;
+    dom.bookingMessages = null;
+    dom.bookingForm = null;
+    dom.bookingParty = null;
+    dom.bookingCapacity = null;
+    dom.bookingSubmit = null;
+    dom.bookingClear = null;
+  }
+
+  /* The panel is built only while a table is chosen, so a diner who has not
+     chosen one is not shown a form for a table that is not theirs. */
+  function buildBookingPanel() {
+    var panel = el('section', {
+      class: 'panel booking',
+      'data-testid': 'booking-form',
+      'aria-labelledby': 'booking-title'
+    }, [
+      el('div', { class: 'panel__head' }, [
+        el('h2', { class: 'panel__title', id: 'booking-title', text: 'Book this table' })
+      ]),
+      el('p', { class: 'booking__summary', 'data-testid': 'booking-summary' }),
+      el('div', { id: 'booking-messages', class: 'stack stack--tight booking__messages' }),
+      el('form', { class: 'booking__body', id: 'booking-form-inner', novalidate: true }, [
+        el('div', { class: 'field booking__party' }, [
+          el('label', { class: 'field__label', for: 'booking-party-size', text: 'Guests' }),
+          el('input', {
+            type: 'number', id: 'booking-party-size', 'data-testid': 'booking-party-size',
+            min: '1', step: '1', inputmode: 'numeric', required: true
+          }),
+          el('p', { class: 'field__hint', id: 'booking-capacity' })
+        ]),
+        el('div', { class: 'actions' }, [
+          el('button', { class: 'btn btn--primary', type: 'submit', 'data-testid': 'booking-submit' }, [
+            el('span', { class: 'btn__label', text: 'Confirm booking' })
+          ]),
+          el('button', {
+            class: 'btn btn--plain', type: 'button', id: 'booking-clear',
+            text: 'Choose another table'
+          })
+        ])
+      ])
+    ]);
+    TK.dom.clear(dom.bookingHost);
+    dom.bookingHost.appendChild(panel);
+    dom.bookingPanel = panel;
+    dom.bookingSummary = testid('booking-summary');
+    dom.bookingMessages = document.getElementById('booking-messages');
+    dom.bookingForm = document.getElementById('booking-form-inner');
+    dom.bookingParty = testid('booking-party-size');
+    dom.bookingCapacity = document.getElementById('booking-capacity');
+    dom.bookingSubmit = testid('booking-submit');
+    dom.bookingClear = document.getElementById('booking-clear');
+    dom.bookingForm.addEventListener('submit', submitBooking);
+    dom.bookingClear.addEventListener('click', function () {
+      dropSelection();
+      markSelected();
+    });
   }
 
   function setBusy(button, on, busyText, idleText) {
@@ -525,6 +600,7 @@
   function openBooking() {
     var selection = state.selection;
     if (!selection) return;
+    if (!dom.bookingPanel) buildBookingPanel();
     var phrase = T.tablePhrase(selection.labels);
     clear(dom.bookingSummary);
     dom.bookingSummary.appendChild(document.createTextNode(
@@ -542,7 +618,6 @@
       : 'This table seats ' + selection.capacity + '.';
     setBookingLabel('Confirm booking');
     clearBookingFeedback();
-    dom.bookingPanel.hidden = false;
     if (window.matchMedia && window.matchMedia('(min-width: 62rem)').matches) {
       dom.bookingPanel.scrollIntoView({ block: 'nearest' });
     }
@@ -671,7 +746,7 @@
           return;
         }
         setBookingLabel('Confirm booking');
-        var refusal = T.refusal(result.code);
+        var refusal = T.refusal(result.code, BOOKING_WORDS);
         bookingError(refusal.title, refusal.text);
         if (result.code === 'table_unavailable') {
           /* the grid is stale now. Refresh it, but leave the diner's choice and
@@ -694,13 +769,6 @@
     clampDateToToday();
     dropSelection();
     runSearch();
-  });
-
-  dom.bookingForm.addEventListener('submit', submitBooking);
-
-  dom.bookingClear.addEventListener('click', function () {
-    dropSelection();
-    markSelected();
   });
 
   TK.onSessionChange(function () {

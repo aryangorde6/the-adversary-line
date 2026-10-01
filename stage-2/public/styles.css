@@ -43,6 +43,8 @@
   --accent-deep: #7d2a11;
   --accent-tint: #fbeee9;
   --accent-line: #eec6b7;
+  /* ink that sits on top of --accent and --accent-deep */
+  --accent-on: #fdf6f2;
 
   --good: #2c6a4c;
   --good-tint: #e8f3ec;
@@ -876,6 +878,12 @@ select {
   color: var(--ink-faint);
 }
 
+/* the chosen cell is the one place ink must step aside for a light colour */
+.cell[data-selected="true"] .cell__note,
+.cell[data-selected="true"]:hover .cell__note {
+  color: var(--accent-on);
+}
+
 /* narrow reshape: the matrix becomes one card per table */
 .grid.is-stacked {
   display: grid;
@@ -953,7 +961,7 @@ select {
   margin: 0 auto var(--s3);
   border-radius: 50%;
   background: var(--paper-deep);
-  color: var(--off);
+  color: var(--ink-faint);
   display: grid;
   place-items: center;
   font-size: 1.25rem;
@@ -1178,6 +1186,50 @@ select {
   font-family: var(--font-display);
   font-weight: 600;
   letter-spacing: 0.06em;
+}
+
+.lookup-host:not(:empty) {
+  margin-top: var(--s5);
+  padding-top: var(--s5);
+  border-top: 1px solid var(--line);
+}
+
+.lookupdetail {
+  background: var(--paper);
+  border-color: var(--line-strong);
+  padding: var(--s4);
+}
+
+.lookupdetail .panel__head {
+  margin-bottom: var(--s2);
+}
+
+.lookupdetail .panel__title {
+  font-size: var(--t-h3);
+  overflow-wrap: anywhere;
+}
+
+.lookupdetail__ref {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 0 var(--s2);
+  margin-top: var(--s2);
+}
+
+.lookupdetail__ref .ref-inline {
+  font-size: var(--t-lead);
+  overflow-wrap: anywhere;
+}
+
+.lookupdetail__foot {
+  margin-top: var(--s4);
+  font-size: var(--t-small);
+  color: var(--ink-soft);
+}
+
+.lookupdetail__actions {
+  margin-top: var(--s4);
 }
 
 @media (max-width: 33.99rem) {
