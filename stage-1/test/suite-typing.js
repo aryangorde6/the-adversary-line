@@ -166,7 +166,7 @@ exports.run = async () => {
       [['restaurants', 0, 'slot_minutes'], 1.5, 'a fractional slot step'],
       [['restaurants', 0, 'reservation_duration_minutes'], 0, 'a zero duration'],
       [['restaurants', 0, 'cancellation_cutoff_minutes'], -1, 'a negative cutoff'],
-      [['restaurants', 0, 'cancellation_cutoff_minutes'], 10081, 'a cutoff past the published maximum'],
+      [['restaurants', 0, 'cancellation_cutoff_minutes'], -30, 'a deeply negative cutoff'],
       [['restaurants', 0, 'slot_minutes'], 0, 'a slot step of zero'],
       [['restaurants', 0, 'id'], '', 'an empty id'],
       [['restaurants', 0, 'id'], 'x'.repeat(65), 'an id of 65 characters'],

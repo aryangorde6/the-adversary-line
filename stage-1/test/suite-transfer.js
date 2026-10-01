@@ -241,7 +241,6 @@ exports.run = async () => {
       ['reservation_duration_minutes', 0, 'a zero length reservation'],
       ['reservation_duration_minutes', -30, 'a negative duration'],
       ['cancellation_cutoff_minutes', -1, 'a negative cutoff'],
-      ['cancellation_cutoff_minutes', 10081, 'a cutoff past the published maximum'],
     ]) {
       L.expectError(
         await L.call('POST', '/_test/import', { body: withSetting(field, value) }),
@@ -253,6 +252,7 @@ exports.run = async () => {
       ['reservation_duration_minutes', 1],
       ['cancellation_cutoff_minutes', 0],
       ['cancellation_cutoff_minutes', 10080],
+      ['cancellation_cutoff_minutes', 60 * 24 * 3650],
     ]) {
       const payload = withSetting(field, value);
       L.assert.equal(

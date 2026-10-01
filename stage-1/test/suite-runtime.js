@@ -209,7 +209,7 @@ exports.run = async () => {
 
   await L.step('minute settings take their own ranges, not one shared one', async () => {
     const fixture = JSON.parse(JSON.stringify(L.FIXTURE));
-    fixture.restaurants[0].cancellation_cutoff_minutes = 10080;
+    fixture.restaurants[0].cancellation_cutoff_minutes = 60 * 24 * 3650;
     fixture.restaurants[0].slot_minutes = 1;
     fixture.restaurants[0].reservation_duration_minutes = 15;
     const reset = await L.call('POST', '/_test/reset', { body: fixture });
@@ -248,19 +248,22 @@ exports.run = async () => {
   /* The three minute settings deliberately do not share a range. slot_minutes and
    * reservation_duration_minutes start at 1; cancellation_cutoff_minutes starts at
    * 0, because a zero cutoff is a real policy rather than a missing value, and it
-   * is capped at the range a later stage publishes for the same field. */
+   * has no ceiling, because the specification states no range for it. */
   await L.step('a cutoff of zero is a policy, not a missing value', async () => {
-    for (const cutoff of [0, 1, 10080]) {
+    for (const cutoff of [0, 1, 10080, 60 * 24 * 3650]) {
       const fixture = clock.alwaysOpen(L.FIXTURE, { cancellation_cutoff_minutes: cutoff });
       const reset = await L.call('POST', '/_test/reset', { body: fixture });
       L.assert.equal(reset.status, 204, `a cutoff of ${cutoff} is accepted`);
     }
-    for (const cutoff of [-1, 10081]) {
+    /* stage-1.md states no range for this field, and its own shipped checks seed a
+     * decade wide cutoff and require it accepted, so there is deliberately no
+     * ceiling here. Only a negative count and a non-whole number are refused. */
+    for (const cutoff of [-1, -30, 30.5]) {
       const fixture = clock.alwaysOpen(L.FIXTURE, { cancellation_cutoff_minutes: cutoff });
       L.expectError(
         await L.call('POST', '/_test/reset', { body: fixture }),
         422, 'validation_failed',
-        cutoff < 0 ? `a cutoff of ${cutoff} is a negative count` : `a cutoff of ${cutoff} exceeds the published maximum`,
+        Number.isInteger(cutoff) ? `a cutoff of ${cutoff} is a negative count` : `a cutoff of ${cutoff} is not a whole number`,
       );
     }
   });

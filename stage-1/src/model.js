@@ -65,13 +65,16 @@ function getState() {
 /* The three minute settings do not share one range. A slot step of zero would make
  * slot generation non-terminating and a zero length reservation is degenerate, so
  * both start at 1. A cutoff of zero is a real policy: every booking is then inside
- * the cutoff, which is what the arithmetic in the booking path already does. Its
- * ceiling is the same range a later stage publishes for the field, so a fixture
- * can express any policy value the service is required to accept. */
+ * the cutoff, which is what the arithmetic in the booking path already does, so
+ * zero is a value rather than a missing one.
+ *
+ * The cutoff has no ceiling. stage-1.md states no range for this field, and its own
+ * shipped checks seed a decade wide cutoff and require it accepted, so a cap here
+ * would refuse a fixture the specification never asked to refuse. */
 const MINUTE_BOUNDS = {
   slot_minutes: { min: 1, max: undefined },
   reservation_duration_minutes: { min: 1, max: undefined },
-  cancellation_cutoff_minutes: { min: 0, max: 10080 },
+  cancellation_cutoff_minutes: { min: 0, max: undefined },
 };
 
 /* Returns the reason a minute setting is unusable, or null when it is fine.
