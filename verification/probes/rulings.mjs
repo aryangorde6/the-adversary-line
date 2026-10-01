@@ -78,18 +78,21 @@ export default async function run() {
   }
   record('R3', coerced.every((entry) => entry.line.includes(` ${entry.want} `)), coerced.map((e) => e.line).join('; '));
 
-  // R5 an optional field that is absent or null is accepted as absent, not a missing-field error
+  /* R5 an optional field that is absent or null is accepted as absent, not a
+   * missing-field error. The room owner named four of them, so all four are
+   * checked in both states, plus a real value of each to show the door is not
+   * simply accepting anything. */
   const optional = [];
-  const optionalCases = [
-    ['reservation id absent', { id: undefined }],
-    ['reservation id null', { id: null }],
-    ['reservation id a string', { id: 'res_custom' }],
-  ];
-  for (const [label, over] of optionalCases) {
-    const body = seedRaw(over);
-    if (over.id === undefined) delete body.reservations[0].id;
-    const res = await resetRaw(body);
-    optional.push({ line: `${label} ${res.status} ${code(res.text)}`, want: 204 });
+  for (const field of ['id', 'reference', 'status', 'created_at']) {
+    for (const [state, over] of [['absent', undefined], ['null', null]]) {
+      const body = seedRaw(over === undefined ? {} : { [field]: over });
+      if (over === undefined) delete body.reservations[0][field];
+      const res = await resetRaw(body);
+      optional.push({ line: `reservation ${field} ${state} ${res.status} ${code(res.text)}`, want: 204 });
+    }
+    const given = { id: 'res_custom', reference: 'SEEDCUSTOM', status: 'confirmed', created_at: '2026-12-01T10:00' }[field];
+    const res = await resetRaw(seedRaw({ [field]: given }));
+    optional.push({ line: `reservation ${field} a real value ${res.status} ${code(res.text)}`, want: 204 });
   }
   record('R5', optional.every((entry) => entry.line.includes(' 204 ')), optional.map((e) => e.line).join('; '));
 
