@@ -1,63 +1,91 @@
-# Running the Tablekeeper stage-1 service
+# Running the Tablekeeper reservations service
 
-## Build and start — one copy-pasteable line
+## Build and start
+
+From the repository root — the folder that contains this `stage-1` folder — one
+line builds the image and starts the service:
 
 ```sh
-docker build -t tablekeeper . && docker run --rm -p 8080:8080 tablekeeper
+cd stage-1 && docker build -t tablekeeper . && docker run --rm -p 8080:8080 tablekeeper
 ```
 
-Run it from this directory (`stage-1/`). Nothing else is needed: the image is
-`node:22-alpine`, has zero runtime dependencies, is built without network access
-and needs no volumes, no configuration and no manual steps.
+That is the whole setup. No volumes, no configuration, no commands to run inside
+the container, no compose file. If you are already inside `stage-1`, drop the
+leading `cd stage-1 &&`.
 
-The service is ready when
+The service prints a listening line and then serves requests. It keeps everything
+in memory, so stopping the container throws its bookings away and the next start
+begins empty.
+
+## Checking it is up
+
+In a second terminal:
 
 ```sh
 curl -s localhost:8080/health
 ```
 
-answers `{"status":"ok"}`.
+The answer is `{"status":"ok"}`. Give it a second or two after starting, and try
+again once if the first attempt is refused.
 
-## Changing the port
-
-`PORT` defaults to `8080`. To use another port, map the same value on both sides:
-
-```sh
-docker build -t tablekeeper . && docker run --rm -e PORT=9000 -p 9000:9000 tablekeeper
-```
-
-The process listens on `0.0.0.0` inside the container and makes no outbound
-network connections at run time.
-
-## Build only
+If your machine has no `curl`, ask the running container itself:
 
 ```sh
-docker build -t tablekeeper .
+docker run -d --name tablekeeper-check -p 8080:8080 tablekeeper
+docker exec tablekeeper-check node -e "fetch('http://127.0.0.1:8080/health').then(r=>r.text()).then(console.log)"
+docker rm -f tablekeeper-check
 ```
 
-## Start only, against an image that already exists
+## Using a different port
+
+`PORT` defaults to `8080` inside the container. To use another port, give the
+same value to the environment and to both sides of the mapping:
+
+```sh
+cd stage-1 && docker build -t tablekeeper . && docker run --rm -e PORT=9000 -p 9000:9000 tablekeeper
+```
+
+Inside the container the process listens on `0.0.0.0` and opens no outbound
+connections, so it runs perfectly well with no internet access at all.
+
+## The same steps on their own
+
+Build only:
+
+```sh
+cd stage-1 && docker build -t tablekeeper .
+```
+
+Start an image you have already built:
 
 ```sh
 docker run --rm -p 8080:8080 tablekeeper
 ```
 
-## Run without Docker
+## Running it without Docker
+
+Needs Node.js 22 or newer. From `stage-1`:
 
 ```sh
 npm start
 ```
 
+`PORT` is honoured here too, so `PORT=9000 npm start` listens on 9000.
+
 ## Own test suite
+
+From `stage-1`, with Node.js 22 or newer. No container and no network:
 
 ```sh
 npm test
 ```
 
-The suite boots the service in-process on an ephemeral port, so it needs no
-container and no network. It prints one line per failed check and ends with
-`checks=<n> passed=<n> failed=<n>`.
+It boots the service in-process on an ephemeral port. It prints one line per
+failed check and ends with `checks=<n> passed=<n> failed=<n>`.
 
 ## What the image contains
 
-`Dockerfile` copies `package.json` and `src/` only, then runs `node src/index.js`
-as the non-root `node` user.
+`Dockerfile` copies `package.json` and `src/` and nothing else, then runs
+`node src/index.js` as the non-root `node` user. The service has no runtime
+dependencies, so the build installs no packages; the only thing it fetches is the
+`node:22-alpine` base image.
