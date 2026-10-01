@@ -294,15 +294,43 @@ exports.run = async () => {
   });
 
   /* The asymmetry the previous step deliberately leaves out, pinned so that it
-   * reads as a decision about resolvability rather than as an oversight. */
-  await L.step('a gap local time imports but cannot be seeded', async () => {
-    const live = JSON.parse(JSON.stringify((await L.call('GET', '/_test/export')).json));
-    const seeded = await L.call('POST', '/_test/reset', {
-      body: seededFrom({ state: { reservations: [{ ...live.state.reservations[0], starts_at_local: '2026-03-29T02:30' }] } }),
+   * reads as a decision about resolvability rather than as an oversight. Both
+   * awkward minutes are named: the spring-forward gap, which has no instant at
+   * all, and the fall-back hour, which has two. Neither is a shape problem and
+   * neither may be refused as one. */
+  await L.step('gap and fall-back local times import but cannot be seeded', async () => {
+    for (const [local, which, seededStatus] of [
+      ['2026-03-29T02:30', 'spring-forward gap', 422],
+      ['2026-10-25T02:30', 'fall-back hour', 204],
+    ]) {
+      const live = JSON.parse(JSON.stringify((await L.call('GET', '/_test/export')).json));
+      const record = { ...live.state.reservations[0], starts_at_local: local };
+      const seeded = await L.call('POST', '/_test/reset', { body: seededFrom({ state: { ...live.state, reservations: [record] } }) });
+      L.assert.equal(seeded.status, seededStatus, `seeding the ${which} time answers ${seeded.status}: ${seeded.text.slice(0, 160)}`);
+      const imported = await L.call('POST', '/_test/import', { body: { ...live, state: { ...live.state, reservations: [record] } } });
+      L.assert.equal(imported.status, 204, `importing the ${which} time is allowed: ${imported.text}`);
+      const held = (await L.call('GET', '/_test/export')).json.state.reservations[0].starts_at_local;
+      L.assert.equal(held, local, `the ${which} time is stored as written, not rewritten`);
+      await L.call('POST', '/_test/import', { body: live });
+    }
+  });
+
+  /* The booking path is where resolvability lives, so it is pinned here too:
+   * the same gap minute that an import must accept is one the service refuses to
+   * create, and it never appears in availability. */
+  await L.step('the booking path refuses a gap minute the import path accepts', async () => {
+    await L.reset(clock.alwaysOpen(L.FIXTURE, { slot_minutes: 1 }));
+    const token = await L.login('ada@example.com', 'correct horse');
+    const created = await L.call('POST', '/reservations', {
+      token,
+      key: 'gap-key',
+      body: { restaurant_id: 'r_anker', table_id: 't_1', starts_at_local: '2026-03-29T02:30', party_size: 2 },
     });
-    L.assert.equal(seeded.status, 422, `seeding a gap time is refused: ${seeded.text}`);
-    const imported = await L.call('POST', '/_test/import', { body: { ...live, state: { ...live.state, reservations: [{ ...live.state.reservations[0], starts_at_local: '2026-03-29T02:30' }] } } });
-    L.assert.equal(imported.status, 204, `importing the same gap time is allowed: ${imported.text}`);
+    L.expectError(created, 422, 'invalid_local_time', 'creating a booking in the spring-forward gap');
+    const slots = await L.call('GET', '/availability?restaurant_id=r_anker&date=2026-03-29&party_size=2');
+    L.assert.equal(slots.status, 200, slots.text);
+    const listed = (slots.json.slots || []).map((s) => s.starts_at_local);
+    L.assert.equal(listed.includes('2026-03-29T02:30'), false, 'the gap minute is never offered as an available start');
   });
 
   /* The import path must not be able to install a minute setting the fixture
