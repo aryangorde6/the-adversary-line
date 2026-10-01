@@ -40,6 +40,14 @@ function withField(path, value) {
   return setPath(clone(BASE), path, value);
 }
 
+/** Delete a deep path on a fixture, e.g. ['restaurants', 0, 'timezone']. */
+function dropPath(fixture, path) {
+  let at = fixture;
+  for (let i = 0; i < path.length - 1; i += 1) at = at[path[i]];
+  delete at[path[path.length - 1]];
+  return fixture;
+}
+
 function seededReservation(overrides = {}) {
   const fixture = clone(BASE);
   fixture.reservations = [{
@@ -78,7 +86,7 @@ exports.run = async () => {
       [['restaurants', 0, 'name'], 7, 'restaurant name is a number'],
       [['restaurants', 0, 'timezone'], 7, 'timezone is a number'],
       [['restaurants', 0, 'slot_minutes'], '30', 'slot_minutes is a string'],
-      [['restaurants', 0, 'reservation_duration_minutes'], null, 'duration is null'],
+      
       [['restaurants', 0, 'cancellation_cutoff_minutes'], true, 'cutoff is a boolean'],
       [['restaurants', 0, 'opening_hours'], {}, 'opening_hours is an object'],
       [['restaurants', 0, 'opening_hours', 0], 'thu', 'an opening hours entry is a string'],
@@ -109,6 +117,46 @@ exports.run = async () => {
     ]) {
       L.expectError(await resetAnswers(setPath(seededReservation(), path, value)), 400, 'malformed_request', label);
     }
+  });
+
+  await L.step('a required field that is absent or null is 422, not a wrong type', async () => {
+    for (const [path, label] of [
+      [['users', 0, 'email'], 'absent user email'],
+      [['users', 0, 'password'], 'absent user password'],
+      [['restaurants', 0, 'timezone'], 'absent timezone'],
+      [['restaurants', 0, 'slot_minutes'], 'absent slot step'],
+      [['restaurants', 0, 'opening_hours', 0, 'weekday'], 'absent weekday'],
+      [['restaurants', 0, 'opening_hours', 0, 'opens'], 'absent opening time'],
+      [['restaurants', 0, 'opening_hours', 0, 'closes'], 'absent closing time'],
+      [['restaurants', 0, 'tables', 0, 'id'], 'absent table id'],
+      [['restaurants', 0, 'tables', 0, 'capacity'], 'absent capacity'],
+    ]) {
+      L.expectError(await resetAnswers(dropPath(clone(BASE), path)), 422, 'validation_failed', label);
+    }
+    for (const [path, label] of [
+      [['users', 0, 'email'], 'null user email'],
+      [['users', 0, 'password'], 'null user password'],
+      [['restaurants', 0, 'timezone'], 'null timezone'],
+      [['restaurants', 0, 'slot_minutes'], 'null slot step'],
+      [['restaurants', 0, 'opening_hours', 0, 'weekday'], 'null weekday'],
+      [['restaurants', 0, 'opening_hours', 0, 'opens'], 'null opening time'],
+      [['restaurants', 0, 'tables', 0, 'id'], 'null table id'],
+      [['restaurants', 0, 'tables', 0, 'capacity'], 'null capacity'],
+    ]) {
+      L.expectError(await resetAnswers(setPath(clone(BASE), path, null)), 422, 'validation_failed', label);
+    }
+    for (const [label, body] of [
+      ['a seeded restaurant id that is null', seededReservation({ restaurant_id: null })],
+      ['a seeded user id that is null', seededReservation({ user_id: null })],
+      ['a seeded table id that is null', seededReservation({ table_id: null })],
+      ['a seeded start time that is null', seededReservation({ starts_at_local: null })],
+      ['a seeded party size that is null', seededReservation({ party_size: null })],
+      ['a seeded party size that is absent', seededReservation({ party_size: undefined })],
+    ]) {
+      L.expectError(await resetAnswers(body), 422, 'validation_failed', label);
+    }
+    L.expectError(await resetAnswers(setPath(withField(BASE, ['restaurants', 0], {}), ['restaurants', 0, 'opening_hours', 0, 'closes'], 1800)), 400, 'malformed_request', 'a closing time that is a number');
+    L.expectError(await resetAnswers(seededReservation({ restaurant_id: 7 })), 400, 'malformed_request', 'a seeded restaurant id that is a number');
   });
 
   await L.step('a fixture field of the right type with a bad value is still 422', async () => {

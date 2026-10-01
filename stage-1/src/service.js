@@ -15,13 +15,14 @@ function normalizeReservations(raw, restaurants) {
   const seenRefs = new Set();
   return raw.map((entry) => {
     const obj = M.requireRecord(entry, 'reservation must be an object');
+    S.requireText(obj.restaurant_id, 'reservation.restaurant_id must be a string');
     const restaurant = restaurants.find((r) => r.id === obj.restaurant_id);
     if (!restaurant) throw errors.validationFailed('seeded reservation references an unknown restaurant');
     const tableId = S.requireId(obj.table_id, 'reservation.table_id');
     if (!restaurant.tables.some((t) => t.id === tableId)) {
       throw errors.validationFailed('seeded reservation references an unknown table');
     }
-    const id = obj.id === undefined ? undefined : S.requireId(obj.id, 'reservation.id');
+    const id = obj.id === undefined || obj.id === null ? undefined : S.requireId(obj.id, 'reservation.id');
     if (id !== undefined) {
       if (seenIds.has(id)) throw errors.validationFailed(`duplicate reservation id ${id}`);
       seenIds.add(id);
@@ -53,9 +54,12 @@ function normalizeReservations(raw, restaurants) {
     if (status !== 'confirmed' && status !== 'cancelled') {
       throw errors.validationFailed('reservation.status must be confirmed or cancelled');
     }
+    if (obj.created_at !== undefined && obj.created_at !== null) {
+      S.requireText(obj.created_at, 'seeded reservation created_at must be a string');
+    }
     const createdAt = obj.created_at === undefined || obj.created_at === null
       ? Date.now()
-      : Date.parse(String(obj.created_at));
+      : Date.parse(obj.created_at);
     return {
       id,
       reference,

@@ -145,31 +145,45 @@ function requireObject(value, message) {
 /* ---- fixture field types ----
  * Spec section 5 reserves 400 malformed_request for a body that does not parse
  * or a field of the wrong JSON type, and gives 422 validation_failed to a field
- * of the correct type whose format or value is wrong. These guards draw that
- * line for the fixture path only; the endpoint paths keep their own rules, and
- * section 11 keeps a badly shaped batch move at 422. */
+ * of the correct type whose format or value is wrong. It also gives 422 to "a
+ * required field, query parameter or header is missing", so the line this draws
+ * is between a field that is absent and a field that is present and wrongly
+ * typed. These guards draw it for the fixture path only; the endpoint paths keep
+ * their own rules, and section 11 keeps a badly shaped batch move at 422. */
+
+/* Absent is missing, not mistyped: undefined and null both mean the caller left
+ * the field out, which is section 5's 422. This matches how every endpoint
+ * already treats a null body field, so one rule now covers the whole service. */
+function present(value) {
+  return value !== undefined && value !== null;
+}
 
 function requireRecord(value, message) {
+  if (!present(value)) throw errors.validationFailed(`${message} is missing`);
   if (!isPlainObject(value)) throw errors.malformedRequest(message);
   return value;
 }
 
 function requireList(value, message) {
+  if (!present(value)) throw errors.validationFailed(`${message} is missing`);
   if (!Array.isArray(value)) throw errors.malformedRequest(message);
   return value;
 }
 
 function requireText(value, message) {
+  if (!present(value)) throw errors.validationFailed(`${message} is missing`);
   if (typeof value !== 'string') throw errors.malformedRequest(message);
   return value;
 }
 
 function requireAmount(value, message) {
+  if (!present(value)) throw errors.validationFailed(`${message} is missing`);
   if (typeof value !== 'number' || Number.isNaN(value)) throw errors.malformedRequest(message);
   return value;
 }
 
 function requireId(value, name) {
+  if (!present(value)) throw errors.validationFailed(`${name} is missing`);
   if (typeof value !== 'string') throw errors.malformedRequest(`${name} must be a string`);
   if (value.length === 0 || value.length > MAX_ID_LENGTH) {
     throw errors.validationFailed(`${name} must be a non-empty string of at most ${MAX_ID_LENGTH} characters`);
