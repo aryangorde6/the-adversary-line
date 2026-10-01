@@ -176,6 +176,68 @@ exports.run = async () => {
     );
   });
 
+  await L.step('a seeded reference must satisfy the reference format', async () => {
+    for (const reference of ['x', 'lower01', 'TOO-LONG-WITH-DASH', 'ABC-DEF']) {
+      const fixture = JSON.parse(JSON.stringify(L.FIXTURE));
+      fixture.reservations = [{
+        id: 'res_seed',
+        reference,
+        user_id: 'u_ada',
+        restaurant_id: 'r_anker',
+        table_id: 't_1',
+        starts_at_local: '2026-12-24T19:00',
+        party_size: 2,
+      }];
+      L.expectError(
+        await L.call('POST', '/_test/reset', { body: fixture }),
+        422, 'validation_failed', `reference ${reference}`,
+      );
+    }
+    const good = JSON.parse(JSON.stringify(L.FIXTURE));
+    good.reservations = [{
+      id: 'res_seed',
+      reference: 'SEED01',
+      user_id: 'u_ada',
+      restaurant_id: 'r_anker',
+      table_id: 't_1',
+      starts_at_local: '2026-12-24T19:00',
+      party_size: 2,
+    }];
+    L.assert.equal((await L.call('POST', '/_test/reset', { body: good })).status, 204);
+  });
+
+  await L.step('minute settings accept any positive whole number', async () => {
+    const fixture = JSON.parse(JSON.stringify(L.FIXTURE));
+    fixture.restaurants[0].cancellation_cutoff_minutes = 60 * 24 * 3650;
+    fixture.restaurants[0].slot_minutes = 1;
+    fixture.restaurants[0].reservation_duration_minutes = 15;
+    const reset = await L.call('POST', '/_test/reset', { body: fixture });
+    L.assert.equal(reset.status, 204, reset.text);
+    const token = await L.login('ada@example.com', 'correct horse');
+    const res = await L.call('POST', '/reservations', {
+      token,
+      key: 'k-long-cutoff',
+      body: { restaurant_id: 'r_anker', table_id: 't_1', starts_at_local: '2026-09-24T19:07', party_size: 2 },
+    });
+    L.assert.equal(res.status, 201, res.text);
+    L.expectError(
+      await L.call('POST', `/reservations/${res.json.reference}/cancel`, { token }),
+      409, 'cutoff_passed', 'a decade long cutoff keeps every booking inside the cutoff',
+    );
+    const avail = await L.call('GET', '/availability?restaurant_id=r_anker&date=2026-09-24&party_size=2');
+    L.assert.equal(avail.status, 200, avail.text);
+    L.assert.equal(avail.json.slots[0].starts_at_local, '2026-09-24T18:00', 'a one minute grid starts at opening');
+    const bad = JSON.parse(JSON.stringify(L.FIXTURE));
+    bad.restaurants[0].slot_minutes = 0;
+    L.expectError(await L.call('POST', '/_test/reset', { body: bad }), 422, 'validation_failed', 'slot_minutes 0');
+    const fractional = JSON.parse(JSON.stringify(L.FIXTURE));
+    fractional.restaurants[0].reservation_duration_minutes = 30.5;
+    L.expectError(
+      await L.call('POST', '/_test/reset', { body: fractional }),
+      422, 'validation_failed', 'fractional duration',
+    );
+  });
+
   await L.step('an empty body is accepted and validated like an empty object', async () => {
     await L.reset(L.FIXTURE);
     const token = await L.login('ada@example.com', 'correct horse');

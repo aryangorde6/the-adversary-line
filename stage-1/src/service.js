@@ -26,7 +26,10 @@ function normalizeReservations(raw, restaurants) {
       if (seenIds.has(id)) throw errors.validationFailed(`duplicate reservation id ${id}`);
       seenIds.add(id);
     }
-    const reference = obj.reference === undefined ? undefined : S.requireId(obj.reference, 'reservation.reference');
+    const reference = obj.reference === undefined || obj.reference === null ? undefined : S.requireId(obj.reference, 'reservation.reference');
+    if (reference !== undefined && !M.REFERENCE_PATTERN.test(reference)) {
+      throw errors.validationFailed('reservation.reference must be 6 to 12 characters of A-Z0-9');
+    }
     if (reference !== undefined) {
       if (seenRefs.has(reference)) throw errors.validationFailed(`duplicate reservation reference ${reference}`);
       seenRefs.add(reference);

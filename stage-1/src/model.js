@@ -6,7 +6,7 @@ const T = require('./time');
 
 const { requireObject, requireId, isPlainObject } = S;
 
-const MAX_MINUTES = 525600;
+const REFERENCE_PATTERN = /^[A-Z0-9]{6,12}$/;
 
 let state = emptyState();
 
@@ -63,8 +63,8 @@ function getState() {
 }
 
 function requireSlot(value, label) {
-  if (typeof value !== 'number' || !Number.isInteger(value) || value < 1 || value > MAX_MINUTES) {
-    throw errors.validationFailed(`${label} must be an integer between 1 and ${MAX_MINUTES}`);
+  if (typeof value !== 'number' || !Number.isInteger(value) || value < 1) {
+    throw errors.validationFailed(`${label} must be a positive whole number of minutes`);
   }
   return value;
 }
@@ -163,6 +163,7 @@ module.exports = {
   getState,
   index,
   requireSlot,
+  REFERENCE_PATTERN,
   normalizeRestaurants,
   normalizeOpeningHours,
   normalizeTables,
