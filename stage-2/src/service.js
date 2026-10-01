@@ -18,8 +18,8 @@ function normalizeReservations(raw, restaurants) {
     S.requireText(obj.restaurant_id, 'reservation.restaurant_id must be a string');
     const restaurant = restaurants.find((r) => r.id === obj.restaurant_id);
     if (!restaurant) throw errors.validationFailed('seeded reservation references an unknown restaurant');
-    const tableId = S.requireId(obj.table_id, 'reservation.table_id');
-    if (!restaurant.tables.some((t) => t.id === tableId)) {
+    const tableIds = D.tableSetFrom(obj, 'reservation', 'stored');
+    if (tableIds.some((id) => !restaurant.tables.some((t) => t.id === id))) {
       throw errors.validationFailed('seeded reservation references an unknown table');
     }
     const id = obj.id === undefined || obj.id === null ? undefined : S.requireId(obj.id, 'reservation.id');
@@ -65,7 +65,7 @@ function normalizeReservations(raw, restaurants) {
       reference,
       user_id: userId,
       restaurant_id: restaurant.id,
-      table_id: tableId,
+      table_ids: tableIds,
       party_size: partySize,
       status,
       starts_instant: local.instantMs,
@@ -140,14 +140,19 @@ function setState(next) {
 
 /* ------------------------------ views ------------------------------ */
 
+/* Responses carry the set always and the singular spelling only for a booking
+ * of exactly one table, so a client written against stage 1 keeps working on
+ * every single-table booking and a combined booking still has one unambiguous
+ * field to read. This is the only place the singular spelling is produced. */
 function reservationView(reservation) {
   const restaurant = M.index.restaurantsById.get(reservation.restaurant_id);
   const zone = restaurant ? restaurant.timezone : 'UTC';
-  return {
+  const tableIds = D.reservedTableIds(reservation);
+  const view = {
     reservation_id: reservation.id,
     reference: reservation.reference,
     restaurant_id: reservation.restaurant_id,
-    table_id: reservation.table_id,
+    table_ids: [...tableIds],
     party_size: reservation.party_size,
     status: reservation.status,
     starts_at_local: reservation.starts_at_local,
@@ -155,6 +160,8 @@ function reservationView(reservation) {
     ends_at: T.rfc3339(reservation.ends_instant, zone),
     created_at: T.rfc3339(reservation.created_at, 'UTC'),
   };
+  if (tableIds.length === 1) view.table_id = tableIds[0];
+  return view;
 }
 
 function restaurantSummary(restaurant) {

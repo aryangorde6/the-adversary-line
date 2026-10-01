@@ -60,7 +60,29 @@ function validateRestaurant(r) {
     && Array.isArray(r.opening_hours)
     && r.opening_hours.every((h) => isPlainObject(h) && isNonEmptyString(h.weekday) && isNonEmptyString(h.opens) && isNonEmptyString(h.closes))
     && Array.isArray(r.tables)
-    && r.tables.every((t) => isPlainObject(t) && isNonEmptyString(t.id) && isCount(t.capacity));
+    && r.tables.every((t) => isPlainObject(t) && isNonEmptyString(t.id) && isCount(t.capacity))
+    /* combinable is optional, so a stage-1 export without it imports. When it
+     * is present it must be a list of pairs; whether a named pair is currently
+     * bookable is not an import question, but the shape has to be readable. */
+    && (r.combinable === undefined
+      || (Array.isArray(r.combinable)
+        && r.combinable.every((p) => Array.isArray(p) && p.length === 2 && p.every(isNonEmptyString))));
+}
+
+/* A stored booking names its tables with table_ids, or with table_id written
+ * by a stage-1 service. Both are accepted so an export crosses the stage
+ * boundary in either direction, and a record carrying both is accepted only when
+ * the two agree, which is checked again with a message when the state is loaded.
+ *
+ * Only the shape is judged here. Whether the set is a declared pair, and whether
+ * the tables are free, are answers about the present rather than about the
+ * record, and an import that refuses a state it is meant to carry would be worse
+ * than one that carries a state that could not be booked today. */
+function validateTableSet(r) {
+  const singular = isNonEmptyString(r.table_id);
+  const plural = Array.isArray(r.table_ids) && r.table_ids.length > 0 && r.table_ids.length <= 2 && r.table_ids.every(isNonEmptyString);
+  if (singular && Array.isArray(r.table_ids)) return plural && r.table_ids.length === 1 && r.table_ids[0] === r.table_id;
+  return singular || plural;
 }
 
 function validateReservation(r) {
@@ -69,7 +91,7 @@ function validateReservation(r) {
     && isNonEmptyString(r.reference)
     && isNonEmptyString(r.user_id)
     && isNonEmptyString(r.restaurant_id)
-    && isNonEmptyString(r.table_id)
+    && validateTableSet(r)
     && isCount(r.party_size)
     && r.party_size >= 1
     && (r.status === 'confirmed' || r.status === 'cancelled')

@@ -156,6 +156,7 @@ function normalizeRestaurants(raw) {
     requireText(obj.timezone, `restaurant ${id} timezone must be a string`);
     if (!T.isValidZone(obj.timezone)) throw errors.validationFailed(`restaurant ${id} has an invalid timezone`);
     requireText(obj.name, `restaurant ${id} name must be a string`);
+    const tables = normalizeTables(obj.tables, `restaurant ${id}`);
     return {
       id,
       name: obj.name,
@@ -164,8 +165,47 @@ function normalizeRestaurants(raw) {
       reservation_duration_minutes: requireMinuteSetting(obj.reservation_duration_minutes, 'reservation_duration_minutes', `restaurant ${id} reservation_duration_minutes`),
       cancellation_cutoff_minutes: requireMinuteSetting(obj.cancellation_cutoff_minutes, 'cancellation_cutoff_minutes', `restaurant ${id} cancellation_cutoff_minutes`),
       opening_hours: normalizeOpeningHours(obj.opening_hours, `restaurant ${id}`),
-      tables: normalizeTables(obj.tables, `restaurant ${id}`),
+      tables,
+      combinable: normalizeCombinable(obj.combinable, tables, id),
     };
+  });
+}
+
+/* Declared table pairs. Absent means no declared pairs, which is what every
+ * stage-1 fixture says by omission and is the only reading under which a
+ * stage-2 service can accept a stage-1 export.
+ *
+ * Order is kept exactly as written and never sorted: stage 2 orders
+ * available_options by combinable order and puts a pair's table_ids in
+ * combinable order, so storing this as a set of pairs would lose the only order
+ * the responses are specified in. Duplicate detection canonicalises to a sorted
+ * key, because a pair is unordered and ["t_2","t_1"] repeats ["t_1","t_2"].
+ *
+ * All four defects are refused rather than dropped. A silently dropped pair is a
+ * policy the restaurant did not choose: an undeclared pair has to stay
+ * unbookable, so quietly forgetting it would change nothing about bookability
+ * but would hide the mistake from whoever wrote the fixture. */
+function normalizeCombinable(raw, tables, restaurantId) {
+  if (raw === undefined || raw === null) return [];
+  requireList(raw, `restaurant ${restaurantId} combinable must be an array`);
+  const known = new Set(tables.map((t) => t.id));
+  const seen = new Set();
+  return raw.map((entry, i) => {
+    const label = `restaurant ${restaurantId} combinable[${i}]`;
+    requireList(entry, `${label} must be an array of two table ids`);
+    if (entry.length !== 2) {
+      throw errors.validationFailed(`${label} must name exactly two tables, and got ${entry.length}`);
+    }
+    const pair = entry.map((value, at) => {
+      requireText(value, `${label}[${at}] must be a table id string`);
+      if (!known.has(value)) throw errors.validationFailed(`${label} names ${value}, which is not a table in ${restaurantId}`);
+      return value;
+    });
+    if (pair[0] === pair[1]) throw errors.validationFailed(`${label} must name two different tables, and names ${pair[0]} twice`);
+    const key = JSON.stringify([...pair].sort());
+    if (seen.has(key)) throw errors.validationFailed(`${label} repeats the pair ${pair[0]} and ${pair[1]}`);
+    seen.add(key);
+    return pair;
   });
 }
 
@@ -215,6 +255,7 @@ module.exports = {
   normalizeRestaurants,
   normalizeOpeningHours,
   normalizeTables,
+  normalizeCombinable,
   normalizeUsers,
   requireObject: S.requireObject,
   isPlainObject,

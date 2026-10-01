@@ -26,7 +26,10 @@ function reservationMoves(ctx) {
     seen.add(reference);
     return {
       reference,
-      tableId: R.optionalString(obj, 'table_id'),
+      named: obj.table_id !== undefined || obj.table_ids !== undefined,
+      tableIds: obj.table_id !== undefined || obj.table_ids !== undefined
+        ? D.tableSetFrom(obj, `the move for ${reference}`, 'request')
+        : undefined,
       startsAtLocal: R.optionalString(obj, 'starts_at_local'),
       partySize: R.optionalPartySize(obj, 'party_size'),
     };
@@ -55,27 +58,35 @@ function reservationMoves(ctx) {
     if (R.cutoffReached(reservation, restaurant, now)) {
       throw errors.cutoffPassed(D.cutoffMessage(restaurant, reservation.starts_at_local));
     }
+    const tableIds = item.named ? item.tableIds : D.reservedTableIds(reservation);
+    D.checkCombinationAllowed(restaurant, tableIds);
     const target = D.resolveTarget(
       restaurant,
-      item.tableId === undefined ? reservation.table_id : item.tableId,
+      tableIds,
       item.startsAtLocal === undefined ? reservation.starts_at_local : item.startsAtLocal,
       item.partySize === undefined ? reservation.party_size : item.partySize,
     );
-    planned.push({ reservation, target });
+    planned.push({ reservation, target, moved: item.named });
   }
 
+  /* Whole-request atomicity is unchanged: nothing below this point writes until
+   * every move in the batch has passed both checks, so a batch that fails here
+   * leaves every booking it named exactly as it was. */
   const ignore = new Set(reservations.map((r) => r.id));
   for (const entry of planned) {
-    const { table, startMs, endMs } = entry.target;
-    if (!D.tableIsFree(restaurantId, table.id, startMs, endMs, ignore)) {
-      throw errors.tableUnavailable('that table is already booked for an overlapping time');
+    const { tableIds: targetIds, startMs, endMs } = entry.target;
+    if (D.blockingTableId(restaurantId, targetIds, startMs, endMs, ignore) !== null) {
+      throw errors.tableUnavailable(D.unavailableWords(targetIds));
     }
   }
   for (let i = 0; i < planned.length; i += 1) {
     for (let j = i + 1; j < planned.length; j += 1) {
       const a = planned[i].target;
       const b = planned[j].target;
-      if (a.table.id !== b.table.id) continue;
+      /* Set intersection, not equality: two combinations collide when they
+       * share any member, and neither need name the same table id as the
+       * other's first member. */
+      if (D.sharedTableIds(a.tableIds, b.tableIds).length === 0) continue;
       if (D.overlaps(a.startMs, a.endMs, b.startMs, b.endMs)) {
         throw errors.tableUnavailable('the requested bookings would overlap each other');
       }
@@ -83,9 +94,12 @@ function reservationMoves(ctx) {
   }
 
   for (let i = 0; i < planned.length; i += 1) {
-    const { reservation, target } = planned[i];
+    const { reservation, target, moved } = planned[i];
     const item = items[i];
-    if (item.tableId !== undefined) reservation.table_id = target.table.id;
+    if (moved) {
+      reservation.table_ids = target.tableIds;
+      delete reservation.table_id;
+    }
     if (item.startsAtLocal !== undefined) {
       reservation.starts_instant = target.startMs;
       reservation.ends_instant = target.endMs;

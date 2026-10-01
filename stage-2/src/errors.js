@@ -26,6 +26,7 @@ const errors = {
   outsideOpeningHours: err(422, 'outside_opening_hours'),
   partyExceedsCapacity: err(422, 'party_exceeds_capacity'),
   invalidLocalTime: err(422, 'invalid_local_time'),
+  combinationNotAllowed: err(422, 'combination_not_allowed'),
 };
 
 function toEnvelope(e) {

@@ -168,13 +168,40 @@ function availability(ctx) {
     if (local.kind !== 'ok') continue;
     const startMs = local.instantMs;
     const endMs = startMs + durationMs;
-    const available = restaurant.tables
-      .filter((table) => table.capacity >= partySize && D.tableIsFree(restaurant.id, table.id, startMs, endMs, null))
+    /* Both lists are built in one pass over the tables so they can never disagree
+ * about which tables exist, and each keeps the order it is specified in.
+ * available_table_ids stays singles-only: a client written against stage 1
+ * reads that field to find tables, and handing it a pair it never asked for
+ * would break every caller that looks a table up in it. Pairs arrive in their
+ * own field instead. */
+const singleTables = restaurant.tables.filter((t) => t.capacity >= partySize);
+const free = (ids) => D.tablesAreFree(restaurant.id, ids, startMs, endMs, null);
+const available = singleTables
+      .filter((table) => free([table.id]))
       .map((table) => table.id);
+const options = [];
+    for (const table of singleTables) {
+      if (!free([table.id])) continue;
+      options.push({ table_ids: [table.id] });
+    }
+    for (const pair of restaurant.combinable) {
+      /* Seats add up across a pair, so a pair is offered when the party fits
+       * the sum, and never offered when both tables are individually free but
+       * the pair itself is not. A pair naming a table this restaurant does not
+       * have cannot be built, but that cannot survive fixture validation, so it
+       * is skipped rather than trusted. */
+      const pairTables = pair.map((id) => restaurant.tables.find((t) => t.id === id));
+      if (pairTables.some((t) => !t)) continue;
+      const seats = pairTables.reduce((sum, t) => sum + t.capacity, 0);
+      if (partySize > seats) continue;
+      if (!free(pair)) continue;
+      options.push({ table_ids: [...pair] });
+    }
     slots.push({
       starts_at_local: T.localDateTime(startMs, restaurant.timezone).minuteText,
       starts_at: T.rfc3339(startMs, restaurant.timezone),
       available_table_ids: available,
+      available_options: options,
     });
   }
   return {
@@ -191,21 +218,23 @@ function availability(ctx) {
 function createReservation(ctx) {
   const body = ctx.body;
   const restaurantId = requiredString(body, 'restaurant_id');
-  const tableId = requiredString(body, 'table_id');
+  const tableIds = D.tableSetFrom(body, 'the request', 'request');
   const startsAtLocal = requiredString(body, 'starts_at_local');
   const partySize = optionalPartySize(body, 'party_size');
   if (partySize === undefined) throw errors.validationFailed('party_size is required');
   const restaurant = restaurantById(restaurantId);
-  const target = D.resolveTarget(restaurant, tableId, startsAtLocal, partySize);
-  if (!D.tableIsFree(restaurant.id, target.table.id, target.startMs, target.endMs, null)) {
-    throw errors.tableUnavailable('that table is already booked for an overlapping time');
+  D.checkCombinationAllowed(restaurant, tableIds);
+  const target = D.resolveTarget(restaurant, tableIds, startsAtLocal, partySize);
+  const blocker = D.blockingTableId(restaurant.id, target.tableIds, target.startMs, target.endMs, null);
+  if (blocker) {
+    throw errors.tableUnavailable(D.unavailableWords(target.tableIds));
   }
   const reservation = {
     id: D.nextReservationId(),
     reference: D.newReference(),
     user_id: ctx.user.id,
     restaurant_id: restaurant.id,
-    table_id: target.table.id,
+    table_ids: target.tableIds,
     party_size: partySize,
     status: 'confirmed',
     starts_instant: target.startMs,
@@ -247,14 +276,25 @@ function patchReservation(ctx) {
   if (cutoffReached(reservation, restaurant, Date.now())) {
     throw errors.cutoffPassed(D.cutoffMessage(restaurant, reservation.starts_at_local));
   }
-  const tableId = optionalString(body, 'table_id') === undefined ? reservation.table_id : optionalString(body, 'table_id');
+  /* A PATCH that names no table at all keeps the current one; a PATCH that
+   * names either spelling replaces the whole set, because a patch of the set is
+   * a statement about the set and not about one member of it. */
+  const named = body.table_id !== undefined || body.table_ids !== undefined;
+  const tableIds = named
+    ? D.tableSetFrom(body, 'the request', 'request')
+    : D.reservedTableIds(reservation);
   const startsAtLocal = optionalString(body, 'starts_at_local') === undefined ? reservation.starts_at_local : optionalString(body, 'starts_at_local');
   const partySize = optionalPartySize(body, 'party_size') === undefined ? reservation.party_size : optionalPartySize(body, 'party_size');
-  const target = D.resolveTarget(restaurant, tableId, startsAtLocal, partySize);
-  if (!D.tableIsFree(restaurant.id, target.table.id, target.startMs, target.endMs, new Set([reservation.id]))) {
-    throw errors.tableUnavailable('that table is already booked for an overlapping time');
+  D.checkCombinationAllowed(restaurant, tableIds);
+  const target = D.resolveTarget(restaurant, tableIds, startsAtLocal, partySize);
+  /* This reservation is excluded from the freeness check, so amending a booking
+   * onto a pair keeps its own current tables available to it. */
+  const blocker = D.blockingTableId(restaurant.id, target.tableIds, target.startMs, target.endMs, new Set([reservation.id]));
+  if (blocker) {
+    throw errors.tableUnavailable(D.unavailableWords(target.tableIds));
   }
-  reservation.table_id = target.table.id;
+  reservation.table_ids = target.tableIds;
+  delete reservation.table_id;
   reservation.party_size = partySize;
   reservation.starts_instant = target.startMs;
   reservation.ends_instant = target.endMs;

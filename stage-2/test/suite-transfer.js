@@ -12,7 +12,7 @@ const clock = require('./clock');
 function seededFrom(snapshot) {
   const stored = snapshot.state || snapshot;
   const copy = (value) => JSON.parse(JSON.stringify(value || []));
-  const seededFields = ['id', 'reference', 'user_id', 'restaurant_id', 'table_id', 'party_size', 'status', 'starts_at_local'];
+  const seededFields = ['id', 'reference', 'user_id', 'restaurant_id', 'table_id', 'table_ids', 'party_size', 'status', 'starts_at_local'];
   return {
     users: copy(L.FIXTURE.users),
     restaurants: copy(stored.restaurants),
