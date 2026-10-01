@@ -5,6 +5,7 @@ import { results, violations, record, ledgerRows, BASE } from './lib.mjs';
 
 const GROUPS = [
   './conventions.mjs',
+  './health-soak.mjs',
   './errors.mjs',
   './auth.mjs',
   './idempotency.mjs',

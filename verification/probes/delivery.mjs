@@ -164,6 +164,66 @@ export default async function run() {
     const duration = Math.max(...answers.map(() => 0)) || 0;
     record('D10', created.length === 1 && conflicts.length === 49 && (listAfter.reservations || []).length === 1,
       `50 simultaneous attempts on one table and slot: ${created.length} answered 201, ${conflicts.length} answered 409 table_unavailable, ${answers.length - created.length - conflicts.length} other, and the reservation list holds ${(listAfter.reservations || []).length}`);
+
+    /* D10b the concurrency requirement again, over several rounds and with a
+     * mixed workload, because a single round of 50 identical requests is a weak
+     * witness: it only fails if the race window happens to line up once. INV1
+     * names two things, so both are checked here. The overlap check is done
+     * client-side from the list, not by trusting a 409, and no partial state is
+     * read as a pass if the store ever interleaves a write. */
+    const ROUNDS = 6;
+    let overlapViolations = 0;
+    let serverErrors = 0;
+    let partial = 0;
+    let exactlyOne = 0;
+    for (let round = 0; round < ROUNDS; round += 1) {
+      const seed = await fetch('http://127.0.0.1:18082/_test/reset', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(fixture({ restaurants: [restaurant({ tables: [table('t_1', 4), table('t_2', 4)] })] })) });
+      await seed.text();
+      const roundToken = (await (await fetch('http://127.0.0.1:18082/auth/login', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ email: 'ada@example.com', password: 'correct horse' }) })).json()).token;
+
+      const call = (path, init) => fetch(`http://127.0.0.1:18082${path}`, init).then(async (res) => ({ status: res.status, body: await res.json().catch(() => null) }));
+      const auth = { 'Content-Type': 'application/json', Authorization: `Bearer ${roundToken}` };
+
+      // 50 in flight, half contending for one table and slot, half spread over
+      // both tables and three slots, with reads and an export mixed in.
+      const mixed = await Promise.all(Array.from({ length: 50 }, (_, i) => {
+        if (i % 5 === 0) return call('/availability?restaurant_id=r_anker&date=2026-12-10&party_size=4');
+        if (i % 5 === 1) return call('/_test/export');
+        if (i % 5 === 2) return call('/restaurants');
+        const sameSlot = i % 2 === 0;
+        return call('/reservations', {
+          method: 'POST',
+          headers: { ...auth, 'Idempotency-Key': `d10b-${round}-${i}` },
+          body: JSON.stringify({
+            restaurant_id: 'r_anker',
+            table_id: sameSlot ? 't_1' : (i % 4 === 1 ? 't_2' : 't_1'),
+            starts_at_local: `2026-12-10T${sameSlot ? '19' : String(19 + Math.floor(i / 4) % 3).padStart(2, '0')}:00`,
+            party_size: 4,
+          }),
+        });
+      }));
+      serverErrors += mixed.filter((a) => a.status >= 500).length;
+
+      const contenders = mixed.filter((a) => a.status === 201 || a.status === 409);
+      if (contenders.filter((a) => a.status === 201).length > 0) exactlyOne += 1;
+
+      // INV1, computed from what the service reports rather than from the answers.
+      const listed = (await call('/reservations', { headers: auth })).body.reservations || [];
+      const confirmed = listed.filter((r) => r.status === 'confirmed');
+      for (let a = 0; a < confirmed.length; a += 1) {
+        for (let b = a + 1; b < confirmed.length; b += 1) {
+          if (confirmed[a].table_id !== confirmed[b].table_id) continue;
+          if (new Date(confirmed[a].starts_at) < new Date(confirmed[b].ends_at)
+            && new Date(confirmed[b].starts_at) < new Date(confirmed[a].ends_at)) overlapViolations += 1;
+        }
+      }
+      // No partial state: everything the list reports must be present in the export.
+      const snap = (await call('/_test/export')).body;
+      const inStore = new Set(((snap && snap.state) || snap || {}).reservations.map((r) => r.reference));
+      partial += listed.filter((r) => !inStore.has(r.reference)).length;
+    }
+    record('D10b', overlapViolations === 0 && serverErrors === 0 && partial === 0 && exactlyOne === ROUNDS,
+      `${ROUNDS} rounds of 50 mixed in-flight requests: ${overlapViolations} overlapping confirmed pairs on one table, ${serverErrors} 5xx, ${partial} listed reservations missing from the export, and ${exactlyOne} of ${ROUNDS} rounds created at least one reservation`);
   } finally {
     cleanup();
     if (started.length) cleanup();

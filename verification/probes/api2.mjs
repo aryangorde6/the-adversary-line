@@ -174,26 +174,31 @@ function threeTables() {
   return fixture({ restaurants: [restaurant({ tables: [table('t_1', 2), table('t_2', 4), table('t_3', 4)] })] });
 }
 
+/* The cutoff rows need a booking just inside the cutoff window and one well
+ * outside it. Both are picked relative to now, so the fixture has to be open at
+ * whatever hour the suite happens to run: the next fortnight, every weekday,
+ * 00:00 to 23:45. Times are then computed as absolute instants and rendered in
+ * Berlin local time, which keeps them correct across midnight and across the DST
+ * change. Building the clock time by adding minutes to "minutes past midnight"
+ * instead produced an hour of 24 late in the evening and a 404 from the service. */
 function openAllDay() {
-  const weekday = berlinWeekday();
-  return fixture({ restaurants: [restaurant({ slot_minutes: 15, reservation_duration_minutes: 60, opening_hours: [{ weekday, opens: '00:00', closes: '23:45' }] })] });
+  const names = ['sun', 'mon', 'tue', 'wed', 'thu', 'fri', 'sat'];
+  const opening_hours = [];
+  for (let i = 0; i < 14; i += 1) {
+    opening_hours.push({ weekday: names[new Date(Date.now() + i * 864e5).getUTCDay()], opens: '00:00', closes: '23:45' });
+  }
+  return fixture({ restaurants: [restaurant({ slot_minutes: 15, reservation_duration_minutes: 60, opening_hours })] });
 }
 
-function berlinNow() {
-  const parts = new Intl.DateTimeFormat('en-CA', { timeZone: 'Europe/Berlin', hour12: false, year: 'numeric', month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit' }).formatToParts(new Date());
-  const get = (t) => Number(parts.find((p) => p.type === t).value);
-  return { date: `${get('year')}-${String(get('month')).padStart(2, '0')}-${String(get('day')).padStart(2, '0')}`, minutes: get('hour') * 60 + get('minute') };
-}
-
-function berlinWeekday() {
-  return ['sun', 'mon', 'tue', 'wed', 'thu', 'fri', 'sat'][new Date().getUTCDay()];
-}
-
-// The next on-grid local slot at least `ahead` minutes from now, today in Berlin.
+/* The next on-grid local slot at least `ahead` minutes from now, in Berlin local
+ * time. The instant is rounded up to the next quarter hour in absolute time and
+ * only then rendered locally: Berlin's offset is always a whole number of hours,
+ * so that always lands on a local :00, :15, :30 or :45, and the date, the hour
+ * and the offset are carried across midnight and DST by the formatter. */
 async function slotAfter(weekday, ahead) {
-  const { date, minutes } = berlinNow();
-  const target = Math.ceil((minutes + ahead) / 15) * 15;
-  const hour = String(Math.floor(target / 60)).padStart(2, '0');
-  const minute = String(target % 60).padStart(2, '0');
-  return `${date}T${hour}:${minute}`;
+  const QUARTER = 15 * 60_000;
+  const when = new Date(Math.ceil((Date.now() + ahead * 60_000) / QUARTER) * QUARTER);
+  const parts = new Intl.DateTimeFormat('en-CA', { timeZone: 'Europe/Berlin', hour12: false, year: 'numeric', month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit' }).formatToParts(when);
+  const get = (t) => String(parts.find((p) => p.type === t).value).padStart(2, '0');
+  return `${get('year')}-${get('month')}-${get('day')}T${get('hour')}:${get('minute')}`;
 }

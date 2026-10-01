@@ -42,7 +42,8 @@ Row counts by group:
 | D7 | Limit: CPU `2 vCPU`. | `probes/delivery/limits.sh` — runs under `--cpus=2` for the whole suite. |
 | D8 | Limit: Memory `2 GiB`. | `probes/delivery/limits.sh` — runs under `--memory=2g` for the whole suite. |
 | D9 | Limit: "Start to first healthy response | 60 s". | `probes/delivery/health_timing.sh` — seconds from container start to the first 200 on `/health`. |
-| D10 | Limit: "Concurrent requests | up to 50 in flight". | `probes/concurrency/overlap_50.sh` — 50 simultaneous booking attempts on one table; at most one 201. |
+| D10 | Limit: "Concurrent requests | up to 50 in flight". | `probes/concurrency/overlap_50.sh` and `probes/delivery.mjs` — 50 simultaneous booking attempts on one table; at most one 201. |
+| D10b | D10 and INV1 over repeated rounds of 50 mixed in-flight requests, not one round of 50 identical ones: no two confirmed reservations overlap on one table, no 5xx, and nothing left in the reservation list that is missing from the export. | `probes/delivery.mjs` — 6 rounds; overlap computed from `GET /reservations`, partial state from `GET /_test/export`. |
 | D11 | Limit: "Per-request timeout | 5 s (10 s for `POST /_test/reset`)". | `probes/delivery/limits.sh` — every request in the suite answers in under 5 s; reset under 10 s. |
 | D12 | Limit: "Outbound network | available during `docker build`, **none at run time**". | `probes/delivery/offline_boot.sh` — run-time container reaches nothing but its own port. |
 | D13 | Limit: "Disk | ephemeral; state need not survive a container restart". | Not a must — permitted, so no probe. Recorded so it is never read as a requirement. |
@@ -57,6 +58,8 @@ Row counts by group:
 | id | Requirement (verbatim) | Check |
 |---|---|---|
 | C1 | "`GET /health  ->  200  {\"status\": \"ok\"}`" | `probes/conventions/health.sh` — exact status and body. |
+| C1b | C1 holds on every call, not just the first: 400 sequential `GET /health` and 50 in flight at once all answer 200 with exactly that body. | `probes/health-soak.mjs` — 400 sequential calls, every status and body recorded; a defect failing a share p of calls is missed with probability (1-p)^400. |
+| C1c | The same under 50 concurrent in-flight health checks. | `probes/health-soak.mjs` — 50 concurrent `GET /health`, all must be 200. |
 | C2 | "Return 200 once the service and its data store can serve requests, within 60 seconds of container start." | `probes/delivery/health_timing.sh` + `probes/conventions/health.sh` — 200 is the first answer and the store serves at once. |
 | C3 | "Non-200 responses are permitted before the service is ready." | Permitted, not required — no probe. |
 | C4 | "`POST /_test/reset` … `->  204 No Content`" | `probes/conventions/reset.sh` — status 204 and an empty body. |
