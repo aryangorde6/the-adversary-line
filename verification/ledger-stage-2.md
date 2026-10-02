@@ -4,7 +4,11 @@ Source of truth: `/home/aryan/band_hack/dark-factory-wearedevs/tablekeeper/spec/
 (read-only; no seat may modify it). Stage-1 requirements continue to apply and are already
 decided in `ledger-stage-1.md`; that ledger is **not** widened. Every row below is one testable
 sentence of stage-2.md: every "must", every "never", every table row, every stated error and
-every limit. 127 rows.
+every limit. 132 rows.
+
+Row ids are unique across both ledgers so a result line names one row unambiguously: stage 1 uses
+D, C, M, E, A, I, P, T, X and V, and this ledger uses R, U, Q, S, G, B, F, L, Y and Z.
+Confirmation is `F` rather than `C` because `C` is stage 1's runtime-contract group.
 
 `Check` names the probe in `verification/probes/` that decides the row. `supplied:<name>` marks a
 row a supplied check already decides. `review` marks a row the specification states as a
@@ -29,7 +33,7 @@ Row counts by group:
 | S | Signup and login screens | 9 |
 | G | Search and availability grid | 12 |
 | B | Booking form | 9 |
-| C | Confirmation | 3 |
+| F | Confirmation | 3 |
 | L | Lookup | 7 |
 | Y | Existing clients after an upgrade | 7 |
 | Z | Combined tables, API and UI | 37 |
@@ -156,9 +160,9 @@ least one of fill colour, border colour, text colour, or an added text glyph —
 
 | id | Requirement (verbatim from stage-2.md) | Check |
 |---|---|---|
-| C1 | "`confirmation` \| Container" — "Shown after a successful booking." | `probes/s2/screens.mjs` → present after a 201 and absent before any booking and after a refusal. |
-| C2 | "`confirmation-reference` \| Text is exactly the reference, no surrounding words" | `probes/s2/screens.mjs` → trimmed text equals the reference the service returned and matches `GET /reservations/{reference}`; no surrounding punctuation or words. |
-| C3 | "`confirmation-details` \| Text contains the restaurant name, table label and local start time" | `probes/s2/screens.mjs` → all three present as text, the time as local `HH:MM` on the chosen date. |
+| F1 | "`confirmation` \| Container" — "Shown after a successful booking." | `probes/s2/screens.mjs` → present after a 201 and absent before any booking and after a refusal. |
+| F2 | "`confirmation-reference` \| Text is exactly the reference, no surrounding words" | `probes/s2/screens.mjs` → trimmed text equals the reference the service returned and matches `GET /reservations/{reference}`; no surrounding punctuation or words. |
+| F3 | "`confirmation-details` \| Text contains the restaurant name, table label and local start time" | `probes/s2/screens.mjs` → all three present as text, the time as local `HH:MM` on the chosen date. |
 ## L — Lookup
 
 | id | Requirement (verbatim from stage-2.md) | Check |
