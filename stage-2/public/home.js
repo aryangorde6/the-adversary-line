@@ -163,8 +163,9 @@
     clear(dom.searchMessages);
     var note = message(tone, title, text);
     if (retry) {
-      var again = el('button', { type: 'button', class: 'btn btn--quiet' },
-        [el('span', { class: 'btn__label', text: 'Try again' })]);
+      var again = el('button', {
+        type: 'button', class: 'btn btn--quiet', 'data-testid': 'retry-button'
+      }, [el('span', { class: 'btn__label', text: 'Try again' })]);
       again.addEventListener('click', retry);
       note.querySelector('.msg__body').appendChild(el('div', { class: 'actions' }, [again]));
     }
@@ -380,8 +381,10 @@
     ]);
     var actions = el('div', { class: 'empty__actions' });
     nextOpenDays(3).forEach(function (day) {
-      var button = el('button', { type: 'button', class: 'btn btn--quiet' },
-        [el('span', { class: 'btn__label', text: T.longDate(day) })]);
+      var button = el('button', {
+        type: 'button', class: 'btn btn--quiet',
+        'data-testid': 'open-day-' + day
+      }, [el('span', { class: 'btn__label', text: T.longDate(day) })]);
       button.addEventListener('click', function () {
         dom.date.value = day;
         runSearch();
@@ -589,6 +592,7 @@
           ]),
           el('button', {
             class: 'btn btn--plain', type: 'button', id: 'booking-clear',
+            'data-testid': 'booking-clear',
             text: 'Choose another table'
           })
         ])

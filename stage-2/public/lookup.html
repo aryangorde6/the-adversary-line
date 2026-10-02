@@ -8,10 +8,10 @@
 <link rel="stylesheet" href="/styles.css">
 </head>
 <body>
-<a class="skip-link" href="#main">Skip to the main content</a>
+<a class="skip-link" href="#main" data-testid="skip-link">Skip to the main content</a>
 <header class="topbar">
   <div class="wrap topbar__inner">
-    <a class="brand" href="/">
+    <a class="brand" href="/" data-testid="brand-home">
       <span class="brand__mark" aria-hidden="true">Tk</span>
       <span>
         <span class="brand__name">Tablekeeper</span>
@@ -19,8 +19,8 @@
       </span>
     </a>
     <nav class="mainnav" aria-label="Main">
-      <a href="/">Find a table</a>
-      <a href="/lookup">My booking</a>
+      <a href="/" data-testid="nav-find-table">Find a table</a>
+      <a href="/lookup" data-testid="nav-my-booking">My booking</a>
     </nav>
     <div class="session" data-testid="session-slot"></div>
   </div>
