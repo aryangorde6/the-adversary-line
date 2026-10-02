@@ -55,8 +55,26 @@ export default async function combinedB() {
   const badEntry = (a1.json.slots || []).flatMap((s) => (s.available_options || [])
     .filter((o) => !Array.isArray(o.table_ids) || !o.table_ids.length || !Number.isInteger(o.capacity))
     .map(() => s.starts_at_local));
-  record('Z10', a1.status === 200 && noOpts.length === 0 && badEntry.length === 0,
-    `slots without available_options: ${noOpts.length}, malformed entries: ${badEntry.length}`);
+  // Each option's capacity must also be the sum of the capacities of the tables it
+  // names, or the number beside the table set is a second, drifting source of truth.
+  const wrongSeats = [];
+  let checked = 0;
+  for (let party = 1; party <= 6; party += 1) {
+    const a = await avail(party);
+    for (const slot of a.json.slots || []) {
+      for (const option of slot.available_options || []) {
+        checked += 1;
+        const sum = (option.table_ids || []).reduce((acc, id) => acc + (cap[id] ?? -1), 0);
+        if (option.capacity !== sum) {
+          wrongSeats.push(`${slot.starts_at_local} ${option.table_ids.join('+')}: ${option.capacity} against ${sum}`);
+        }
+      }
+    }
+  }
+  record('Z10', a1.status === 200 && noOpts.length === 0 && badEntry.length === 0 && wrongSeats.length === 0,
+    `slots without available_options: ${noOpts.length}, malformed entries: ${badEntry.length}, `
+    + `entries whose capacity is not the sum of their own tables: ${wrongSeats.length} of ${checked} checked `
+    + `across party sizes 1 to 6; first slot at party 4: ${JSON.stringify((a1.json.slots || [])[0]?.available_options || [])}`);
   const notSingle = (a1.json.slots || []).flatMap((s) => (s.available_table_ids || [])
     .filter((id) => !tables.some((t) => t.id === id)).map((id) => `${s.starts_at_local}:${id}`));
   record('Z11', notSingle.length === 0, `non-single ids in available_table_ids: ${notSingle.join(', ') || 'none'}`);
