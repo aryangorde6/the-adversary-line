@@ -212,6 +212,100 @@ def ratio(fg, bg):
     return (hi + 0.05) / (lo + 0.05)
 
 
+HIERARCHY = r"""
+() => {
+  const vis = (el) => { const b = el.getBoundingClientRect(); const st = getComputedStyle(el);
+    return b.width > 0 && b.height > 0 && st.visibility !== 'hidden' && st.display !== 'none'; };
+  const parse = (c) => { const m = String(c).match(/rgba?\(([^)]+)\)/); if (!m) return null;
+    const p = m[1].split(',').map(x => parseFloat(x)); return {rgb: [p[0], p[1], p[2]], a: p.length > 3 ? p[3] : 1}; };
+  const lum = (rgb) => { const f = rgb.map(v => { v /= 255; return v <= 0.03928 ? v / 12.92 :
+      Math.pow((v + 0.055) / 1.055, 2.4); }); return 0.2126 * f[0] + 0.7152 * f[1] + 0.0722 * f[2]; };
+  /* The element's own background is often transparent, and a transparent value is not
+     black: reading it as one scores the text against the wrong ground. So the chain is
+     walked until a background is actually painted. */
+  const bgOf = (el) => { let n = el; while (n && n.nodeType === 1) {
+      const c = parse(getComputedStyle(n).backgroundColor); if (c && c.a > 0) return c.rgb; n = n.parentElement; }
+    return [255, 255, 255]; };
+  const ratio = (el) => { const fg = parse(getComputedStyle(el).color); if (!fg) return null;
+    const hi = lum(fg.rgb), lo = lum(bgOf(el)); const [a, b] = hi > lo ? [hi, lo] : [lo, hi];
+    return Math.round(((a + 0.05) / (b + 0.05)) * 100) / 100; };
+  const isPrimary = (el) => /(^|\s)btn--primary(\s|$)/.test(el.className || '');
+  const name = (el) => el.getAttribute('data-testid') || (el.innerText || '').trim().slice(0, 22);
+  const all = [...document.querySelectorAll('button, a.btn')].filter(vis);
+  /* Grid cells are selection, not action: the chosen time is painted in the accent on
+     purpose, and counting it as a second dominant action would fail a screen that is
+     telling the diner exactly which time they picked. */
+  const inGrid = (el) => Boolean(el.closest('[data-testid="availability-grid"]'));
+  const buttons = all.filter(b => !inGrid(b));
+  const cells = all.filter(inGrid);
+  const headings = [...document.querySelectorAll('h1, h2, h3')].filter(vis)
+    .concat([...document.querySelectorAll('h1, h2, h3')].filter(el => !vis(el)));
+  const top = headings.filter(el => el.offsetParent !== null || el.getBoundingClientRect().height > 0);
+  const first = top.sort((a, b) => a.getBoundingClientRect().top - b.getBoundingClientRect().top)[0] || null;
+  /* The content a heading names is what follows it, not the wrapper it sits inside, so the
+     first candidate below the heading's own bottom edge is the one to compare against. */
+  const candidates = [...document.querySelectorAll(
+    'main form, main section, main [data-testid="availability-grid"], main input, main p, main table')]
+    .filter(vis);
+  const below = first ? candidates.filter(el => el.getBoundingClientRect().top >= first.getBoundingClientRect().bottom) : [];
+  const content = below[0] || null;
+  const transparent = buttons.find(b => { const c = parse(getComputedStyle(b).backgroundColor);
+    return c && c.a === 0; });
+  return {
+    primaries: buttons.filter(isPrimary).map(name),
+    filled: buttons.filter(b => { const c = parse(getComputedStyle(b).backgroundColor); return c && c.a > 0; }).map(name),
+    grounds: buttons.map(b => name(b) + '=' + getComputedStyle(b).backgroundColor),
+    cells: cells.length,
+    selected: cells.filter(c => { const k = parse(getComputedStyle(c).backgroundColor);
+      return k && k.a > 0 && k.rgb.join() === '163,58,28'; }).map(name),
+    contrast: buttons.map(b => ({name: name(b), ratio: ratio(b), primary: isPrimary(b)})),
+    heading: first ? {tag: first.tagName, text: (first.innerText || '').trim().slice(0, 40),
+                      top: Math.round(first.getBoundingClientRect().top)} : null,
+    headings: headings.map(h => ({tag: h.tagName, text: (h.innerText || '').trim().slice(0, 40),
+                                  shown: h.getBoundingClientRect().height > 0})),
+    contentTop: content ? Math.round(content.getBoundingClientRect().top) : null,
+    contentName: content ? (content.getAttribute('data-testid') || content.tagName.toLowerCase()) : None,
+    transparent: transparent ? {name: name(transparent),
+                                own: getComputedStyle(transparent).backgroundColor,
+                                ratio: ratio(transparent)} : null,
+  };
+}
+"""
+
+
+def hierarchy(page):
+    """Q3 -- one dominant action per screen and a heading above the content it names.
+
+    Dominance is measured as the only primary-styled control and the only control with a
+    painted background, so nothing else on the screen presents itself as the action to take.
+    Contrast is recorded but is not a pass condition: the quiet controls measure higher
+    against white than the filled accent does, and picking the higher ratio as the dominant
+    action would reward the least prominent control on the screen.
+    """
+    info = page.evaluate(HIERARCHY)
+    heading, top = info["heading"], info["heading"]["top"] if info["heading"] else None
+    above = top is not None and info["contentTop"] is not None and top <= info["contentTop"]
+    # Nothing else may be painted like the dominant action. A quiet control with a pale
+    # background is ordinary furniture and does not compete; a second control in the same
+    # accent would be a second thing on the screen asking to be pressed.
+    grounds = {}
+    for entry in info["grounds"]:
+        who, _, background = entry.partition("=")
+        grounds.setdefault(background, []).append(who)
+    dominant = [bg for bg, who in grounds.items() if any(name in info["primaries"] for name in who)]
+    alone = len(dominant) == 1 and all(len(grounds[bg]) == 1 for bg in dominant)
+    ok = len(info["primaries"]) == 1 and alone and above
+    contrast = ", ".join(f"{c['name']} {c['ratio']}" for c in info["contrast"])
+    shown = [h for h in info["headings"] if h["shown"]]
+    return ok, (f"one dominant action {info['primaries']}, no other control painted like it, grounds "
+                f"{info['grounds']}, "
+                f"first heading {heading['tag'] if heading else None} {heading['text']!r} at {top} against "
+                f"{info['contentName']} at {info['contentTop']}, so the heading sits above the content it "
+                f"names {above}; grid cells {info['cells']}, of which the chosen time is painted in the accent "
+                f"{info['selected']}; "
+                f"headings in the document {[(h['tag'], h['text']) for h in shown]}; contrast {contrast}")
+
+
 def labelled(blob):
     return [c for c in blob["labels"] if not c["label"]]
 
@@ -243,6 +337,26 @@ def states(page):
         page.wait_for_timeout(700)
         screens["refused"] = measure(page)
     return screens, free
+
+
+def q3_hierarchy(page):
+    """Q3 across the four named screens and the booking form, per screen, at both widths."""
+    S.sign_in(page)
+    screens = {}
+    for name, route in (("sign in", "/login"), ("sign up", "/signup"), ("my booking", "/lookup")):
+        page.goto(f"{BASE}{route}", wait_until="networkidle")
+        page.wait_for_timeout(200)
+        screens[name] = hierarchy(page)
+    S.search(page, party=2)
+    screens["search"] = hierarchy(page)
+    cells = [k for k, v in S.cell_map(page).items() if v == "true" and "+" not in k]
+    if cells:
+        page.click(f'[data-testid="{cells[0]}"]')
+        page.wait_for_timeout(300)
+        screens["booking form open"] = hierarchy(page)
+    bad = {name: detail for name, (_, detail) in screens.items() if not screens[name][0]}
+    S.record("Q3", not bad,
+        "; ".join(f"{name}: {detail}" for name, (_, detail) in screens.items())[:900])
 
 
 def feedback_states(page):
@@ -479,6 +593,7 @@ def run(pw):
             conf_style = page.evaluate(STYLE_OF["confirmation"], "confirmation")
             S.record("Q12", conf_style is not None and conf_style != form_style,
                 f"{tag} confirmation {conf_style!r} against the form {form_style!r}")
+        q3_hierarchy(page)
         feedback_states(page)
         consistency(page)
         bad = off_screen(page)
