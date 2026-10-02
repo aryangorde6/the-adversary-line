@@ -169,20 +169,28 @@ function availability(ctx) {
     const startMs = local.instantMs;
     const endMs = startMs + durationMs;
     /* Both lists are built in one pass over the tables so they can never disagree
- * about which tables exist, and each keeps the order it is specified in.
- * available_table_ids stays singles-only: a client written against stage 1
- * reads that field to find tables, and handing it a pair it never asked for
- * would break every caller that looks a table up in it. Pairs arrive in their
- * own field instead. */
-const singleTables = restaurant.tables.filter((t) => t.capacity >= partySize);
-const free = (ids) => D.tablesAreFree(restaurant.id, ids, startMs, endMs, null);
-const available = singleTables
+     * about which tables exist, and each keeps the order it is specified in.
+     * available_table_ids stays singles-only: a client written against stage 1
+     * reads that field to find tables, and handing it a pair it never asked for
+     * would break every caller that looks a table up in it. Pairs arrive in their
+     * own field instead.
+     *
+     * Every option carries the seats it actually offers, not a copy of the party
+     * size: a client reads capacity to decide whether the option still fits after
+     * the party grows, and a client that finds an option with no capacity has to
+     * look the tables up itself to learn seats it was already told about. Seats
+     * come from the tables themselves -- one table's own capacity for a single,
+     * the sum for a pair -- so the number can never disagree with the table set
+     * named beside it. */
+    const singleTables = restaurant.tables.filter((t) => t.capacity >= partySize);
+    const free = (ids) => D.tablesAreFree(restaurant.id, ids, startMs, endMs, null);
+    const singleIds = singleTables
       .filter((table) => free([table.id]))
       .map((table) => table.id);
-const options = [];
+    const options = [];
     for (const table of singleTables) {
       if (!free([table.id])) continue;
-      options.push({ table_ids: [table.id] });
+      options.push({ table_ids: [table.id], capacity: table.capacity });
     }
     for (const pair of restaurant.combinable) {
       /* Seats add up across a pair, so a pair is offered when the party fits
@@ -195,12 +203,12 @@ const options = [];
       const seats = pairTables.reduce((sum, t) => sum + t.capacity, 0);
       if (partySize > seats) continue;
       if (!free(pair)) continue;
-      options.push({ table_ids: [...pair] });
+      options.push({ table_ids: [...pair], capacity: seats });
     }
     slots.push({
       starts_at_local: T.localDateTime(startMs, restaurant.timezone).minuteText,
       starts_at: T.rfc3339(startMs, restaurant.timezone),
-      available_table_ids: available,
+      available_table_ids: singleIds,
       available_options: options,
     });
   }
