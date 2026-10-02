@@ -120,8 +120,16 @@ function sendError(res, error) {
     sendJson(res, error.status, toEnvelope(error));
     return;
   }
+  /* Anything that is not an AppError is a fault in this service, not something
+   * the request did. Answering 422 tells the caller its own input was refused and
+   * tells a reader of the logs nothing, which is how a missing field deep in the
+   * read path once answered every availability query with 422 and looked like a
+   * policy refusal. The stack still goes to stderr, which is where the diagnosis
+   * belongs; the caller is told the request failed here and nothing about our
+   * internals. Every refusal this service means to make is thrown as an AppError
+   * above, so this branch is only reached by a genuine defect. */
   process.stderr.write(`[tablekeeper] unexpected failure: ${error && error.stack ? error.stack : String(error)}\n`);
-  sendJson(res, 422, { error: { code: 'validation_failed', message: 'the request could not be processed' } });
+  sendJson(res, 500, { error: { code: 'internal_error', message: 'the request could not be processed' } });
 }
 
 function storeReceipt(userId, key, method, path, bodyHash, status, body) {

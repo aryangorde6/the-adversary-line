@@ -38,11 +38,33 @@ function receiptKey(userId, key, method, path) {
   return JSON.stringify([userId, method, path, key]);
 }
 
+/* Every reader reaches a restaurant through restaurantsById, so the declared-pair
+ * default is filled in here rather than at each place that iterates combinable.
+ * Absent means no declared pairs: that is the default normalizeCombinable
+ * documents, and it is the only reading under which a stage-1 export, which never
+ * writes the field, can be carried at all. Filling it per consumer instead would
+ * be the same invariant restated once per consumer, and the next consumer added
+ * would be the one that forgets.
+ *
+ * Only the index is given the default. state.restaurants keeps the bytes it was
+ * stored with, so a state that arrived without the field is exported without it
+ * and the round trip stays exact. A restaurant that already declares pairs is
+ * handed back as itself rather than copied, so the fixture path allocates
+ * nothing and index identity matches stored identity.
+ *
+ * The copy is shallow and safe because a stored restaurant is never mutated once
+ * it is installed: the only field written after install is a reservation's
+ * reference, and the arrays below are read-only everywhere they are reachable. */
+function withDeclaredPairs(restaurant) {
+  if (Array.isArray(restaurant.combinable)) return restaurant;
+  return { ...restaurant, combinable: [] };
+}
+
 function reindex() {
   index.usersById = new Map(state.users.map((u) => [u.id, u]));
   index.usersByEmail = new Map(state.users.map((u) => [u.email.toLowerCase(), u]));
   index.tokensByValue = new Map(state.tokens.map((t) => [t.token, t.user_id]));
-  index.restaurantsById = new Map(state.restaurants.map((r) => [r.id, r]));
+  index.restaurantsById = new Map(state.restaurants.map((r) => [r.id, withDeclaredPairs(r)]));
   index.reservationsByRef = new Map(state.reservations.map((r) => [r.reference, r]));
   index.reservationsById = new Map(state.reservations.map((r) => [r.id, r]));
   index.reservationsByUser = new Map();
