@@ -157,18 +157,11 @@ def out_of_order(page):
     """U1, U2 — a slow first search must not overwrite a fast second one."""
     S.sign_in(page)
     page.goto(f"{BASE}/", wait_until="networkidle")
-    slow = {"first": True}
-
-    def slow_first(route):
-        if slow["first"] and "/availability" in route.request.url:
-            slow["first"] = False
-            response = route.fetch()
-            time.sleep(2.5)
-            route.fulfill(response=response)
-        else:
-            route.continue_()
-
-    page.route("**/availability*", slow_first)
+    # The first answer is held inside the page. Holding it in a route handler instead
+    # would block the thread the sync API uses for my own calls, so the second search
+    # could not be issued until the first had been delivered and the two answers could
+    # never actually cross.
+    S.delay_next_availability(page, 2500, first_only=True)
     page.fill('[data-testid="date-input"]', S.TODAY)
     S.testid(page, "party-size-input").first.fill("2")
     page.click('[data-testid="search-button"]')

@@ -194,7 +194,8 @@ def style_of(testid):
         return s.backgroundColor + '|' + s.color + '|' + s.borderColor; }"""
 
 
-STYLE_OF = {t: style_of(t) for t in ("booking-form", "booking-error", "booking-uncertain", "confirmation")}
+STYLE_OF = {t: style_of(t) for t in ("booking-form", "booking-error", "booking-uncertain", "confirmation",
+                                      "loading", "no-slots")}
 
 RAW = re.compile(r"[{}]|\"[a-z_]+\"\s*:|\b\w+_\w+\b|\d{2}:\d{2}:\d{2}[+-]\d{2}:\d{2}")
 CONTROL = re.compile(r"rgb\((\d+),\s*(\d+),\s*(\d+)\)")
@@ -251,25 +252,24 @@ def feedback_states(page):
     page.wait_for_timeout(300)
     settled = set(page.evaluate(SIGNATURE).split("\n"))
 
-    def slow(route):
-        import time
-        time.sleep(1.6)
-        route.continue_()
-
-    page.route("**/availability*", slow)
+    # The answer is held inside the page, not by a blocking route handler, so this
+    # snapshot really lands while the request is still outstanding.
+    S.delay_next_availability(page, 1600, first_only=True)
     S.testid(page, "party-size-input").first.fill("2")
     page.click('[data-testid="search-button"]')
-    page.wait_for_timeout(700)
-    during = set(page.evaluate(SIGNATURE).split("\n"))
-    page.wait_for_timeout(2600)
-    page.unroute("**/availability*")
     page.wait_for_timeout(500)
+    during = set(page.evaluate(SIGNATURE).split("\n"))
+    waiting = S.visible(page, "loading")
+    waiting_style = page.evaluate(STYLE_OF["loading"], "loading")
+    waiting_say = S.text_of(page, "loading")
+    page.wait_for_timeout(2600)
+    page.wait_for_timeout(500)
+    left = S.visible(page, "loading")
     appeared = sorted(x for x in during - settled if x)
-    S.record("Q11", bool(appeared),
+    S.record("Q11", waiting and bool(appeared) and not left,
         f"a search answered 1.6s late; while it was outstanding the page held {len(during)} elements, "
-        f"{len(appeared)} of them new against the settled page: {appeared[:5]}")
-    S.record("Q23", bool(appeared),
-        f"the loading state is {appeared[:5] if appeared else 'nothing: the settled page stays on screen untouched'}")
+        f"{len(appeared)} of them new against the settled page: {appeared[:5]}; the waiting node is present "
+        f"{waiting} during the wait and {left} once the answer lands, reading {waiting_say!r}")
 
     # A closed day: real text, and no empty grid frame full of dead cells.
     closed = page.evaluate("""() => { const d = document.querySelector('[data-testid="date-input"]').value;
@@ -283,8 +283,12 @@ def feedback_states(page):
     page.wait_for_timeout(1500)
     empty_text = S.text_of(page, "no-slots")
     empty_cells = page.locator('[data-testid^="slot-"]').count()
+    empty_style = page.evaluate(STYLE_OF["no-slots"], "no-slots")
     S.record("Q22", bool(empty_text) and empty_cells == 0,
         f"a closed day reads {empty_text!r} with {empty_cells} cells")
+    S.record("Q23", bool(waiting_style) and waiting_style != empty_style and not S.visible(page, "loading"),
+        f"the empty state is {empty_text!r} styled {empty_style}, the waiting state styled {waiting_style}, "
+        f"so waiting cannot read as nothing free that day")
 
     # Refused and uncertain side by side.
     page.goto(f"{BASE}/", wait_until="networkidle")

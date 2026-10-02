@@ -20,6 +20,10 @@ RESULTS = []
 def record(row, ok, detail=""):
     RESULTS.append((row, bool(ok), detail))
     print(f"{'PASS' if ok else 'FAIL'} {row}" + ("" if ok else f": {detail}"), flush=True)
+    # A pass should still leave its measurement behind: TK_VERBOSE=1 keeps the numbers
+    # a passing row actually saw, so a verdict can be re-read without re-running.
+    if detail and os.environ.get("TK_VERBOSE"):
+        print(f"       {detail}", flush=True)
 
 
 KEYS = {"n": 0}
@@ -92,6 +96,30 @@ def search(page, party=2, slot_index=0):
     page.fill('[data-testid="party-size-input"]', str(party))
     page.click('[data-testid="search-button"]')
     page.wait_for_timeout(500)
+
+
+def delay_next_availability(page, ms, first_only=False):
+    """Hold an availability answer inside the page for `ms`, leaving the driver free.
+
+    A time.sleep() inside a route handler runs on the same thread the sync API uses for
+    every page call, so it serialises with my own waits: the snapshot taken "while the
+    request was outstanding" could not run until the held response had been delivered and
+    the app had rendered the settled page, and the row measured the settled page instead
+    of the waiting one. Delaying inside the page leaves Playwright free to sample at will.
+    `first_only` holds just the next answer, so a later search can overtake it.
+    """
+    page.evaluate("""([ms, firstOnly]) => {
+      if (window.__advSlow) return;
+      window.__advSlow = {held: false};
+      const real = window.fetch.bind(window);
+      window.fetch = (url, opts) => {
+        const hit = String(url).includes('/availability')
+          && (!firstOnly || !window.__advSlow.held);
+        if (!hit) return real(url, opts);
+        window.__advSlow.held = true;
+        return new Promise((done, fail) => setTimeout(() => real(url, opts).then(done, fail), ms));
+      };
+    }""", [ms, first_only])
 
 
 def scroll_check(page):
