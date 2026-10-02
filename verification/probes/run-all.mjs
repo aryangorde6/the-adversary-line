@@ -19,6 +19,7 @@ const GROUPS = [
   './open-questions.mjs',
   './rulings.mjs',
   './sweep.mjs',
+  './cutoff-boundary.mjs',
 ];
 
 for (const path of GROUPS) {

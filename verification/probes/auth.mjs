@@ -118,6 +118,41 @@ export default async function run() {
   const keysUsed = users.length ? Object.keys(users[0]).sort() : [];
   const leaks = JSON.stringify(state).includes('correct horse');
   record('A9', noPlaintext && !leaks && !keysUsed.includes('password'), `user records hold ${JSON.stringify(keysUsed)}, plaintext password present in the export: ${leaks}`);
+
+  /* A9b the same question asked of a user created through the runtime signup
+   * path, which A9 never reaches. A9 reads the user fixture, and a fixture
+   * password is hashed while the fixture is being built, so A9 passes against a
+   * service that stores a signup password verbatim. Nothing about that is visible
+   * through the API: signup answers 201 and login answers 200 either way, so the
+   * export is the only place the stored credential is observable.
+   *
+   * The password used here is deliberately unlike any other string in the suite,
+   * so a hit names this row and not another. The three assertions the Foreman
+   * asked for are kept in one row rather than three: the plaintext must be absent
+   * from the whole export, what is stored must look like a hash rather than the
+   * password, and the stored form must still verify. */
+  const RUNTIME_PASSWORD = 'zz-runtime-only-9f3c1d7b';
+  const RUNTIME_EMAIL = 'runtime-probe@example.com';
+  await fresh();
+  const signedUp = await POST('/auth/signup', { body: { email: RUNTIME_EMAIL, password: RUNTIME_PASSWORD, display_name: 'Runtime' } });
+  const snapRes = await GET('/_test/export');
+  const raw = snapRes.text;
+  const snap = snapRes.json;
+  const stored = ((snap && snap.state && snap.state.users) || []).find((u) => u.email === RUNTIME_EMAIL);
+  const credential = stored && stored.password_hash;
+  const leaksRuntime = raw.includes(RUNTIME_PASSWORD);
+  const notPlaintext = typeof credential === 'string' && credential !== RUNTIME_PASSWORD && !credential.includes(RUNTIME_PASSWORD) && credential.length > 20;
+  // A hash is either a tagged parameter string carrying cost parameters and a
+  // salt, in any number of `$`-separated groups (scrypt's own encoding is
+  // `scrypt$N$r$p$salt$key`), or a long hex digest. A password, with or without a
+  // tag in front of it, is neither: the password here is a lower-case dictionary
+  // of letters and digits, so it would otherwise sail through a length test.
+  const looksHashed = typeof credential === 'string'
+    && (/^[a-z][a-z0-9-]*(\$[\w+./=-]+){2,}$/i.test(credential) || /^[0-9a-f]{64,256}$/i.test(credential));
+  const verifies = await POST('/auth/login', { body: { email: RUNTIME_EMAIL, password: RUNTIME_PASSWORD } });
+  const wrongRefused = await POST('/auth/login', { body: { email: RUNTIME_EMAIL, password: `${RUNTIME_PASSWORD}-wrong` } });
+  record('A9b', signedUp.status === 201 && !leaksRuntime && notPlaintext && looksHashed && verifies.status === 200 && wrongRefused.status === 401,
+    `runtime signup ${signedUp.status}; the export for ${RUNTIME_EMAIL} contains the plaintext password: ${leaksRuntime}; the stored credential is ${typeof credential === 'string' ? `${credential.slice(0, 12)}... (${credential.length} chars, recognisably hashed: ${looksHashed})` : String(credential)}; the same password logs in ${verifies.status} and a near-miss is refused ${wrongRefused.status}`);
 }
 
 function deep(a, b) { return JSON.stringify(a) === JSON.stringify(b); }
