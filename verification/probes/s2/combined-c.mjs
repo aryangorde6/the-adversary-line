@@ -120,6 +120,36 @@ export default async function combinedC() {
     && JSON.stringify(afterOverlap.json.starts_at_local) === JSON.stringify(c),
     `a move onto tables held at an overlapping time answered ${overlap.status} ${code(overlap)}; the booking still holds ${JSON.stringify(afterOverlap.json.table_ids)} at ${afterOverlap.json.starts_at_local}`);
 
+  /* The second half of Z35 is a batch that collides with itself. The check above
+   * only proves a move is refused when the clash is with a booking already in
+   * state, which the per-move conflict check answers on its own. A batch whose
+   * own two moves name the same tables over the same interval can only be caught
+   * by comparing the batch's results against each other, so it needs its own
+   * request: one batch, two moves, one shared table, one shared time. */
+  token = await reset();
+  const b1 = await slotAt(0, 2);
+  const b2 = await slotAt(0, 2);
+  const self1 = await book(token, { restaurant_id: 'r_anker', table_id: 't_1', starts_at_local: b1, party_size: 2 });
+  const self2 = await book(token, { restaurant_id: 'r_anker', table_id: 't_3', starts_at_local: b2, party_size: 2 });
+  const intra = await POST('/reservation-moves', {
+    token, key: `m${seq++}`,
+    body: {
+      moves: [
+        { reference: self1.json.reference, table_ids: ['t_1', 't_2'], starts_at_local: b1 },
+        { reference: self2.json.reference, table_ids: ['t_1', 't_2'], starts_at_local: b1 },
+      ],
+    },
+  });
+  const selfAfter1 = await GET(`/reservations/${self1.json.reference}`, { token });
+  const selfAfter2 = await GET(`/reservations/${self2.json.reference}`, { token });
+  const heldSamePair = (x) => JSON.stringify(x.json.table_ids) === JSON.stringify(['t_1', 't_2']);
+  const bothCommitted = intra.status === 201 && heldSamePair(selfAfter1) && heldSamePair(selfAfter2);
+  record('Z35', bothCommitted === false && intra.status === 409 && code(intra) === 'table_unavailable'
+    && !heldSamePair(selfAfter1) && !heldSamePair(selfAfter2),
+    `one batch naming the same pair at the same slot twice answered ${intra.status} ${code(intra)}; `
+    + `the two bookings still hold ${JSON.stringify(selfAfter1.json.table_ids)} and ${JSON.stringify(selfAfter2.json.table_ids)}, `
+    + `so the batch changed nothing`);
+
   // Z37 — 50 in-flight bookings over one member: one winner, no double booking.
   token = await reset();
   const target = await slotAt(0, 2);

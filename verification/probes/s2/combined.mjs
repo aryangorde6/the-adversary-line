@@ -88,10 +88,22 @@ export default async function combined() {
     `table_id body gave table_ids ${JSON.stringify(r.json && r.json.table_ids)}`);
   record('Z19', r.status === 201 && r.json.table_id === 't_3', `single body carried table_id ${JSON.stringify(r.json && r.json.table_id)}`);
 
-  // Z17 — both keys at once.
-  r = await book(token, { restaurant_id: 'r_anker', table_id: 't_3', table_ids: ['t_1', 't_2'], starts_at_local: at, party_size: 2 });
-  record('Z17', r.status === 422 && r.json.error && r.json.error.code === 'validation_failed',
-    `both keys answered ${r.status} ${r.json && r.json.error && r.json.error.code}`);
+  /* Z17 — both keys at once. Two shapes, because a single one is not enough:
+   * a body whose two spellings disagree is refused by the self-agreement check
+   * as well, so a service that dropped the both-keys rule entirely would still
+   * refuse it and the row would pass for the wrong reason. The agreeing body
+   * (table_id t_4 beside table_ids [t_4], on a table nothing else in this run
+   * has taken) is refused by the both-keys rule alone, so this pair decides the
+   * row on the rule the requirement names. */
+  const disagreeing = await book(token, { restaurant_id: 'r_anker', table_id: 't_3', table_ids: ['t_1', 't_2'], starts_at_local: at, party_size: 2 });
+  const agreeing = await book(token, { restaurant_id: 'r_anker', table_id: 't_4', table_ids: ['t_4'], starts_at_local: at, party_size: 2 });
+  const refused = (x) => x.status === 422 && x.json.error && x.json.error.code === 'validation_failed';
+  const after = await avail(2);
+  const stillOne = (after.json.slots || []).filter((s) => s.available_options.some((o) => o.table_ids.length > 1)).length;
+  record('Z17', refused(disagreeing) && refused(agreeing),
+    `both keys disagreeing answered ${disagreeing.status} ${disagreeing.json && disagreeing.json.error && disagreeing.json.error.code}; `
+    + `both keys agreeing (table_id t_4 beside table_ids [t_4]) answered ${agreeing.status} `
+    + `${agreeing.json && agreeing.json.error && agreeing.json.error.code}; ${stillOne} slots still offer a combination, so neither body booked`);
 
   // Z5, Z6, Z21 — undeclared and transitive pairs.
   r = await book(token, { restaurant_id: 'r_anker', table_ids: ['t_1', 't_4'], starts_at_local: at, party_size: 8 });
