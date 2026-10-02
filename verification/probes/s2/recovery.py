@@ -63,6 +63,38 @@ def taken_by_another_client(page):
         "the 409 case shows booking-error, not booking-uncertain")
 
 
+def pair_refused(page):
+    """U15, Z36 — a combination cell that is gone by the time the form is submitted."""
+    S.sign_in(page)
+    S.search(page, party=6)
+    pairs = [k for k, v in S.cell_map(page).items() if v == "true" and "+" in k]
+    if not pairs:
+        S.record("U15", False, "no combination cell was offered")
+        S.record("Z36", False, "no combination cell was offered")
+        return
+    pair = pairs[len(pairs) // 2]
+    a, b = pair[len("slot-"):].split("+")[0], pair[len("slot-"):].split("+")[1].split("-")[0]
+    clock = pair.rsplit("-", 1)[1]
+    page.click(f'[data-testid="{pair}"]')
+    page.wait_for_timeout(300)
+    summary = S.text_of(page, "booking-summary")
+    token = S.token_of(page)
+    stolen = S.api("POST", "/reservations", {"restaurant_id": "r_anker", "table_ids": [a, b],
+                   "starts_at_local": f"{S.TODAY}T{clock}", "party_size": 6}, token)
+    page.click('[data-testid="booking-submit"]')
+    page.wait_for_timeout(900)
+    err = S.visible(page, "booking-error")
+    unc = S.visible(page, "booking-uncertain")
+    S.record("U15", err and not unc and not S.visible(page, "confirmation"),
+        f"the combination {pair} was taken by another client ({stolen[0]}); the form answered "
+        f"booking-error={err} reading {S.text_of(page, 'booking-error')!r}, uncertain={unc}")
+    held = [r for r in S.api("GET", "/_test/export")[1]["state"]["reservations"]
+            if set([a, b]).issubset(set(r.get("table_ids", [])))]
+    S.record("Z36", len(held) == 1,
+        f"the refused combination left {len(held)} booking holding both tables, and the summary named "
+        f"them: {summary!r}")
+
+
 def lost_response(page):
     """U6, U7, U8, U9, U12, U13 — the request reaches the service and the answer never arrives."""
     S.sign_in(page)
@@ -170,6 +202,9 @@ def run(pw):
     S.api("POST", "/_test/reset", S.fixture())
     page = ctx.new_page()
     taken_by_another_client(page)
+    S.api("POST", "/_test/reset", S.fixture())
+    page = ctx.new_page()
+    pair_refused(page)
     S.api("POST", "/_test/reset", S.fixture())
     page = ctx.new_page()
     lost_response(page)

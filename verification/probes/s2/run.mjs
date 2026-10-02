@@ -36,7 +36,9 @@ for (const path of GROUPS) {
   }
 }
 for (const id of PERMITTED) record(id, true, 'the specification permits this; nothing to enforce');
-for (const id of REVIEW) record(id, true, 'decided by reading the screenshots; the reason is in results/<commit>.md');
+// Q1, Q2 and Q3 are matters of direction that a person has to judge from the screenshots.
+// This runner cannot read images, so it leaves them undecided rather than claiming a reason.
+console.log(`--- not decided here, they need a reader of the screenshots: ${REVIEW.join(' ')}`);
 
 const decided = new Set(results.map((r) => r.rowId));
 const ledger = ledgerIds();
