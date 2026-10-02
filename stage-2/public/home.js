@@ -313,10 +313,22 @@
 
   function renderLoading(text) {
     clear(dom.gridHost);
-    dom.gridHost.appendChild(el('div', { class: 'loading', role: 'status' }, [
+    var loading = el('div', {
+      class: 'loading',
+      role: 'status',
+      'aria-live': 'polite',
+      'aria-busy': 'true',
+      'data-testid': 'loading'
+    }, [
       el('span', { class: 'spinner', 'aria-hidden': 'true' }),
-      el('span', { text: text + '…' })
-    ]));
+      el('span', { class: 'loading__say', text: text + '…' })
+    ]);
+    /* Placeholder rows stand in for the grid that is on its way, so the panel
+       never collapses to a line of words and then jumps. */
+    for (var i = 0; i < 3; i += 1) {
+      loading.appendChild(el('span', { class: 'loading__bar', 'aria-hidden': 'true' }));
+    }
+    dom.gridHost.appendChild(loading);
   }
 
   var WEEKDAY_INDEX = { mon: 1, tue: 2, wed: 3, thu: 4, fri: 5, sat: 6, sun: 0 };
@@ -519,6 +531,7 @@
     state.receipt = null;
     TK.dom.clear(dom.receiptHost);
     markSelected();
+    updateSearchButton();
     openBooking();
   }
 
@@ -534,6 +547,18 @@
     dom.bookingCapacity = null;
     dom.bookingSubmit = null;
     dom.bookingClear = null;
+    updateSearchButton();
+  }
+
+  function updateSearchButton() {
+    if (!dom.searchButton) return;
+    if (state.selection) {
+      dom.searchButton.classList.remove('btn--primary');
+      dom.searchButton.classList.add('btn--quiet');
+    } else {
+      dom.searchButton.classList.remove('btn--quiet');
+      dom.searchButton.classList.add('btn--primary');
+    }
   }
 
   /* The panel is built only while a table is chosen, so a diner who has not
@@ -787,6 +812,7 @@
   });
 
   if (!dom.party.value) dom.party.value = '2';
+  updateSearchButton();
   loadRestaurants().then(function (ok) {
     if (!ok) return;
     clampDateToToday();
