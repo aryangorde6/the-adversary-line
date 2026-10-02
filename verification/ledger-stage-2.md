@@ -207,7 +207,7 @@ least one of fill colour, border colour, text colour, or an added text glyph —
 | Z14 | "`table_ids` within a pair is in `combinable` order." | `probes/s2/combined.mjs` → each pair's `table_ids` equals the `combinable` entry, never reversed. |
 | Z15 | "The body takes `table_ids` instead of `table_id`" | `probes/s2/combined.mjs` → a two-member `table_ids` body is honoured and stored. |
 | Z16 | "`table_id` is still accepted and means a set of one." | `probes/s2/combined.mjs` → a `table_id` body returns 201 and `table_ids` of length one. |
-| Z17 | "Sending both is 422 `validation_failed`." | `probes/s2/combined.mjs` → both keys present is 422 with code `validation_failed` and no reservation created. |
+| Z17 | "Sending both is 422 `validation_failed`." | `probes/s2/combined.mjs` → both keys present is 422 with code `validation_failed` and no reservation created, checked in two shapes: spellings that disagree, and spellings that agree (which the self-agreement check would otherwise refuse for its own reason). |
 | Z18 | "Responses always carry `table_ids`." | `probes/s2/combined.mjs` → every 200/201 reservation body and every read-back has `table_ids` matching the stored set. |
 | Z19 | "They also carry `table_id` **when the set has exactly one member**" | `probes/s2/combined.mjs` → single-table create and read-back carry `table_id` equal to that member. |
 | Z20 | "and omit it otherwise." | `probes/s2/combined.mjs` → a two-member create and read-back have no `table_id` key at all. |
@@ -225,6 +225,6 @@ least one of fill colour, border colour, text colour, or an added text glyph —
 | Z32 | "`booking-summary` must name every table in the selection." | `probes/s2/screens.py` → a pair selection's summary names both labels, not one and not the raw ids alone. |
 | Z33 | "A single-table booking's cell testid, confirmation and lookup are unchanged." | `probes/s2/screens.py` → `slot-t_2-19:00` style, no `+`, `confirmation-reference` still exactly the reference, lookup unchanged. |
 | Z34 | "Atomic reservation moves from stage 1 also accept `table_ids` per move." | `probes/s2/combined.mjs` → a stage-1 move request whose bodies carry `table_ids` applies and returns 200. |
-| Z35 | "No table may belong to overlapping resulting bookings." | `probes/s2/combined.mjs` → a move to a set sharing a table with a resulting booking is refused, and no overlap exists after any accepted move. |
+| Z35 | "No table may belong to overlapping resulting bookings." | `probes/s2/combined-c.mjs` → a move to a set sharing a table with a booking already in state is refused, and no overlap exists after any accepted move; separately, one batch whose own two moves name the same tables over the same interval is refused whole, which only a comparison of the batch against itself can catch. |
 | Z36 | "The existing browser recovery and original-receipt requirements also apply to combined-table bookings." | `probes/s2/screens.py` → U3, U6, U8, U9 re-run for pairs. |
 | Z37 | "Concurrent requests must produce the same results as executing them one at a time in some order, and the requirements above hold at every read." | `probes/s2/combined.mjs` → 50 in-flight pair bookings over one member produce exactly one 201 and the rest 409, and every read afterwards satisfies Z2 and Z12. |
