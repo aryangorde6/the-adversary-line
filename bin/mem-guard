@@ -1,0 +1,227 @@
+#!/usr/bin/env python3
+"""Keeps memory from filling up during a run.
+
+Seats start services and containers to check their work, and many leave them running when the
+check is done. Over a stage they pile up (one practice stage left 14 containers and 25 service
+processes behind; each service held about 270 MB), the laptop's memory and then its swap fill, and the desktop and the seats
+themselves stall or get killed. Every minute this reclaims what the seats left behind:
+
+  - a background process inside a seat's jail that its runtime no longer owns: when the shell
+    that started it exits, it is handed to the jail's first process. The runtime, its filter and
+    any command the seat is running right now are never touched: they sit under the filter;
+  - a Docker container (the checks run the product in one) that has been up too long.
+
+Age limits: --max-age minutes normally, --low-age when memory is low (available memory under
+--low MB, or free swap under --low-swap MB), --critical-age when available memory is under
+--critical MB. Something past its age limit is reclaimed only once it has also used no CPU for
+that long (a seat still probing a service keeps it), or once it passes a cap whatever it is
+doing: --busy-cap minutes while memory is low, --critical-age x 5 when it is critical, and
+--busy-cap-ok minutes while there is memory to spare (a 45-minute cap with memory free removed the
+checker's service halfway through a verification). The event harness's own
+containers (--keep, default df-*) clean up after themselves and meet only the cap. Time the
+laptop spent asleep never counts: after a wake-up, ages and idle times start again from it (a
+check that was running when the lid closed carries on afterwards). A seat that
+still needs a service starts it again; a restart costs seconds, a full memory costs the run.
+Nothing outside the factory's seats and containers is touched.
+
+usage: mem-guard [--every 60] [--max-age 15] [--low 1000] [--low-swap 2000] [--low-age 5]
+                 [--critical 500] [--critical-age 2] [--busy-cap 45] [--busy-cap-ok 180] [--keep REGEX] [--once] [--dry-run]
+       (log: logs/mem-guard.log)
+"""
+import argparse, calendar, os, pathlib, re, signal, subprocess, time
+
+HERE = pathlib.Path(__file__).resolve().parent
+LOG = HERE.parent / "logs/mem-guard.log"
+TICK = os.sysconf("SC_CLK_TCK")
+ACTIVE = 0.1  # CPU seconds between two looks that count as being in use; an idle service shows 0
+
+
+def say(msg, dry=False):
+    line = f"{time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime())} {'(dry run) ' if dry else ''}{msg}"
+    print(line, flush=True)
+    with open(LOG, "a") as f:
+        f.write(line + "\n")
+
+
+def meminfo():
+    m = {}
+    for line in open("/proc/meminfo"):
+        k, v = line.split(":", 1)
+        m[k] = int(v.split()[0]) // 1024  # MB
+    return m
+
+
+def procs():
+    """pid -> (ppid, age in s, rss MB, command line, argv, CPU s) for every process we can read."""
+    uptime = float(open("/proc/uptime").read().split()[0])
+    out = {}
+    for d in pathlib.Path("/proc").iterdir():
+        if not d.name.isdigit():
+            continue
+        try:
+            st = (d / "stat").read_text()
+            f = st[st.rindex(")") + 2:].split()
+            argv = (d / "cmdline").read_bytes().split(b"\0")
+        except (OSError, ValueError):
+            continue
+        cmd = b" ".join(argv).decode(errors="replace").strip()
+        out[int(d.name)] = (int(f[1]), uptime - int(f[19]) / TICK, int(f[21]) * os.sysconf("SC_PAGE_SIZE") // 2**20, cmd, argv,
+                            (int(f[11]) + int(f[12])) / TICK)
+    return out
+
+
+def seat_of(pid):
+    try:
+        env = (pathlib.Path(f"/proc/{pid}/environ")).read_bytes().split(b"\0")
+    except OSError:
+        return None
+    return next((e[10:].decode() for e in env if e.startswith(b"SEAT_NAME=")), None)
+
+
+def leftovers(ps):
+    """(seat, pid, age, rss, cmd, cpu) for processes handed to a seat jail's first process: the jail's
+    first process has the seat's filter as its child; anything else it holds was orphaned there."""
+    found = []
+    for pid, (ppid, _, _, _, argv, _) in ps.items():
+        if len(argv) < 2 or not argv[1].endswith(b".seat-bin/acp-quiet"):
+            continue
+        seat = seat_of(pid) or "?"
+        jail = ppid
+        for other, (opp, age, rss, ocmd, _, cpu) in ps.items():
+            if opp == jail and other != pid:
+                found.append((seat, other, age, rss, ocmd, cpu))
+    return found
+
+
+def containers():
+    """(name, age s, id, CPU s or None) of running containers."""
+    try:
+        out = subprocess.run(["docker", "ps", "--no-trunc", "--format", "{{.ID}}\t{{.Names}}"], capture_output=True, text=True, timeout=30).stdout
+    except (OSError, subprocess.TimeoutExpired):
+        return []
+    rows = [l.split("\t") for l in out.splitlines() if "\t" in l]
+    if not rows:
+        return []
+    try:
+        started = subprocess.run(["docker", "inspect", "--format", "{{.State.StartedAt}}"] + [r[0] for r in rows],
+                                 capture_output=True, text=True, timeout=30).stdout.split()
+    except (OSError, subprocess.TimeoutExpired):
+        return []
+    res = []
+    for (cid, name), s in zip(rows, started):
+        t = calendar.timegm(time.strptime(s[:19], "%Y-%m-%dT%H:%M:%S"))
+        res.append((name, time.time() - t, cid, container_cpu(cid)))
+    return res
+
+
+def container_cpu(cid):
+    try:
+        for line in open(f"/sys/fs/cgroup/system.slice/docker-{cid}.scope/cpu.stat"):
+            if line.startswith("usage_usec "):
+                return int(line.split()[1]) / 1e6
+    except (OSError, ValueError):
+        pass
+    return None
+
+
+class Idle:
+    """How long each process or container has used no CPU, from what this guard has seen."""
+
+    def __init__(self, blind=False):
+        self.seen = {}  # key -> (CPU s when it last moved, when)
+        self.blind = blind  # one look (--once) sees no history: judge by age alone
+
+    def __call__(self, key, cpu, now):
+        if cpu is None or self.blind:  # unreadable: judged by age alone, as before
+            return float("inf")
+        old = self.seen.get(key)
+        if old is None or cpu - old[0] > ACTIVE:
+            self.seen[key] = (cpu, now)
+            return 0.0
+        return now - old[1]
+
+    def forget(self, live):
+        for k in set(self.seen) - set(live):
+            del self.seen[k]
+
+
+def due(age, idle, limit, cap):
+    """Past its age limit and idle for as long, or past the cap whatever it is doing (minutes)."""
+    return age >= limit * 60 and (idle >= limit * 60 or age >= cap * 60)
+
+
+def main():
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--every", type=int, default=60)
+    ap.add_argument("--max-age", type=float, default=15)
+    ap.add_argument("--low", type=int, default=1000)
+    ap.add_argument("--low-swap", type=int, default=2000)
+    ap.add_argument("--low-age", type=float, default=5)
+    ap.add_argument("--critical", type=int, default=500)
+    ap.add_argument("--critical-age", type=float, default=2)
+    ap.add_argument("--busy-cap", type=float, default=45)
+    ap.add_argument("--busy-cap-ok", type=float, default=180)
+    ap.add_argument("--keep", default=r"^df-", help="container names that meet only the cap (the harness removes its own)")
+    ap.add_argument("--once", action="store_true")
+    ap.add_argument("--dry-run", action="store_true")
+    a = ap.parse_args()
+    LOG.parent.mkdir(exist_ok=True)
+    keep = re.compile(a.keep)
+    idle = Idle(blind=a.once)
+    last_look, awake_since = None, 0.0
+
+    def woke(since, gap):
+        """The laptop slept if more wall-clock time passed than the wait (or one look) takes."""
+        nonlocal awake_since, last_look
+        if since and time.time() - since > gap:
+            awake_since = last_look = time.time()
+            idle.seen.clear()
+            say(f"woke after {(awake_since - since) / 60:.0f} min asleep: ages and idle times start again now")
+
+    while True:
+        woke(last_look, 3 * a.every + 30)
+        last_look = time.time()
+        m = meminfo()
+        avail, swap = m["MemAvailable"], m["SwapFree"]
+        cap = a.busy_cap
+        if avail < a.critical:
+            limit, why, cap = a.critical_age, f"critical: {avail} MB available", a.critical_age * 5
+        elif avail < a.low or swap < a.low_swap:
+            limit, why = a.low_age, f"low: {avail} MB available, {swap} MB swap free"
+        else:
+            limit, why, cap = a.max_age, None, a.busy_cap_ok
+        ps, boxes = procs(), containers()
+        woke(last_look, 120)  # asleep in the middle of this look
+        now, live = time.time(), []
+        for seat, pid, age, rss, cmd, cpu in leftovers(ps):
+            age = min(age, now - awake_since) if awake_since else age
+            key = ("pid", pid, cmd)  # a reused pid runs something else
+            live.append(key)
+            quiet = idle(key, cpu, now)
+            if due(age, quiet, limit, cap):
+                if not a.dry_run:
+                    try:
+                        os.kill(pid, signal.SIGTERM)
+                    except OSError:
+                        continue
+                say(f"{seat}: stopped a leftover process after {age / 60:.0f} min, {min(quiet, age) / 60:.0f} idle ({rss} MB): {cmd[:100]}"
+                    + (f" [{why}]" if why else ""), a.dry_run)
+        for name, age, cid, cpu in boxes:
+            age = min(age, now - awake_since) if awake_since else age
+            live.append(cid)
+            quiet = 0.0 if keep.search(name) else idle(cid, cpu, now)
+            if due(age, quiet, limit, cap):
+                if not a.dry_run:
+                    subprocess.run(["docker", "rm", "-f", cid], capture_output=True, timeout=60)
+                say(f"removed container {name} after {age / 60:.0f} min, {min(quiet, age) / 60:.0f} idle" + (f" [{why}]" if why else ""), a.dry_run)
+        idle.forget(live)
+        if a.once:
+            return
+        # Wall-clock wait: a plain sleep does not count time the laptop spent suspended.
+        until = time.time() + a.every
+        while time.time() < until:
+            time.sleep(min(15, max(0.0, until - time.time())))
+
+
+if __name__ == "__main__":
+    main()

@@ -1,0 +1,19 @@
+#!/usr/bin/env bash
+# Each seat commits only what it owns, so the history shows who wrote what. A seat that stages
+# everything would otherwise commit other seats' unfinished files under its own name.
+# SEAT_NAME is set by the seat launcher; commits made outside a seat are not checked.
+seat=${SEAT_NAME:-}; [[ -z $seat ]] && exit 0
+case $seat in
+  adversary) allow='^verification/' ; deny='^verification/sabotage/'; owns='verification/ (not verification/sabotage/)' ;;
+  saboteur)  allow='^verification/sabotage/'; deny='^$'; owns='verification/sabotage/' ;;
+  builder|finisher) allow='^(stage-[0-9]+/|\.gitignore$)'; deny='^$'; owns='the stage folders (stage-N/) and .gitignore' ;;
+  *) allow='^$'; deny='^$'; owns='nothing: this seat does not commit' ;;
+esac
+bad=$(git diff --cached --name-only --diff-filter=ACMRD | grep -Ev "$allow" ; git diff --cached --name-only --diff-filter=ACMRD | grep -E "$allow" | grep -E "$deny" | grep -v '^$')
+[[ -z $bad ]] && exit 0
+{ echo "pre-commit: as ${seat^} you commit only $owns."
+  echo "These staged files are not yours (another seat's work, or outside your area):"
+  sed 's/^/  /' <<< "$bad"
+  echo "Unstage them with: git restore --staged -- <file>   then commit only your own files, added by name."
+} >&2
+exit 1

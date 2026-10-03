@@ -1,0 +1,49 @@
+#!/usr/bin/env bash
+# End a run so that its room stays finished.
+#
+#   bin/end-run <room-id> [--lead foreman] [--no-stop]
+#   (--no-stop: leave the seats running, e.g. to clear an older room before ending the current one)
+#
+# A seat keeps one runtime session per room it was ever in, and starting a seat resumes all of
+# them: an old message then pulls the seat back into the finished room (in practice the lead seat
+# began the next task inside the old room and re-added the others to it). So, while the seats are
+# still running: remove every seat but the lead from the room, detach each seat's session for
+# the room (a detach times out while a turn is running: it is retried until the seat is idle),
+# and only then stop the seats. A detach made after the stop does not hold.
+set -uo pipefail
+HERE=$(cd "$(dirname "$0")/.." && pwd)
+ROOM=${1:?usage: bin/end-run <room-id> [--lead foreman] [--no-stop]}; shift
+LEAD=foreman STOP=1
+while [[ $# -gt 0 ]]; do case $1 in --lead) LEAD=$2; shift 2;; --no-stop) STOP=0; shift;; *) echo "unknown argument $1" >&2; exit 2;; esac; done
+OWNER=$(band list 2>/dev/null | sed -n "s#^\([^/ ]*\)/$LEAD \[df-$LEAD\].*#\1#p" | head -1)
+[[ -n $OWNER ]] || { echo "end-run: cannot find the lead seat df-$LEAD" >&2; exit 1; }
+SEATS=$(for f in "$HERE"/mandates/*.md; do basename "$f" .md; done)
+
+bound() { band sessions --session "df-$1" 2>/dev/null | grep "^default-$ROOM " | grep -q "binding=bound"; }
+
+for s in $SEATS; do
+  [[ $s == "$LEAD" ]] && continue
+  out=$(timeout 60 band chat remove --session "df-$LEAD" "$ROOM" "$OWNER/$s" 2>&1 | tail -1)
+  printf '%-10s %s\n' "$s" "$out"
+done
+for s in $SEATS; do
+  for try in 1 2 3 4 5 6 7 8 9 10; do
+    bound "$s" || { printf '%-10s no session for the room\n' "$s"; break; }
+    if timeout 90 band detach --session "df-$s" --host-session "default-$ROOM" >/dev/null 2>&1 && ! bound "$s"; then
+      printf '%-10s detached\n' "$s"; break
+    fi
+    printf '%-10s busy (a turn is running); retrying in 60 s\n' "$s"; sleep 60
+  done
+done
+# Messages still queued for the room come back when a seat next starts: Band re-creates the lead's
+# session for the room it owns and delivers them there (1 Oct: the Foreman worked a stale message in
+# the ended room for 4 minutes). Settle them now. A seat already removed from the room cannot settle
+# its own (Band answers 404), and no session of that seat can receive them.
+for s in $SEATS; do
+  n=0; for id in $(band inbox --session "df-$s" 2>/dev/null | grep -F "[$ROOM] " | awk '{print $2}'); do
+    band ack --session "df-$s" "$id" >/dev/null 2>&1 && n=$((n+1)); done
+  [[ $n -gt 0 ]] && printf '%-10s settled %d queued message(s) for the room\n' "$s" "$n"
+done
+left=$(for s in $SEATS; do bound "$s" && echo "$s"; done | tr '\n' ' ')
+[[ -n $left ]] && { echo "end-run: still attached to the room: $left— not stopping; run again when they are idle" >&2; exit 1; }
+[[ $STOP == 1 ]] && "$HERE/bin/stop-seats" || echo "seats left running (--no-stop)"

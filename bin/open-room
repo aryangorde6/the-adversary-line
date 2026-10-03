@@ -1,0 +1,26 @@
+#!/usr/bin/env bash
+# Create a room owned by the coordinating seat, with every seat and you in it. Prints the room id.
+#   bin/open-room --owner <your Band username> [--lead foreman]
+set -euo pipefail
+HERE=$(cd "$(dirname "$0")/.." && pwd); OWNER="" LEAD=foreman
+while [[ $# -gt 0 ]]; do case $1 in --owner) OWNER=$2; shift 2;; --lead) LEAD=$2; shift 2;; *) exit 2;; esac; done
+[[ -n $OWNER ]] || { echo "usage: $0 --owner <band username>" >&2; exit 2; }
+seats=$(for f in "$HERE"/mandates/*.md; do basename "$f" .md; done | grep -vx "$LEAD")
+first=$(head -1 <<< "$seats")
+# `chat new` can exit non-zero (a response it cannot decode) after creating the room: trust the id it prints.
+room=$(band chat new --session "df-$LEAD" --with "$OWNER/$first" 2>&1 | grep -oE '[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}' | head -1) || true
+[[ -n $room ]] || { echo "room was not created" >&2; exit 1; }
+# `chat add` can print a decoding error even when the add worked, so trust only the participant list.
+for s in $seats "$OWNER"; do
+  [[ $s == "$OWNER" ]] && who=$OWNER || who=$OWNER/$s
+  band chat add --session "df-$LEAD" "$room" "$who" >/dev/null 2>&1 || true
+done
+# The participant list can lag the adds, and the daemon can refuse one call: retry before failing.
+for try in 1 2 3 4 5; do
+  sleep 2; missing=""
+  parts=$(band chat participants --session "df-$LEAD" "$room" 2>&1) || true
+  for s in $LEAD $seats; do grep -q "^$OWNER/$s " <<< "$parts" || missing+=" $s"; done
+  grep -q "^$OWNER \[" <<< "$parts" || missing+=" you($OWNER)"
+  [[ -z $missing ]] && { echo "$room"; exit 0; }
+done
+echo "room $room is missing:$missing" >&2; echo "participants were:" >&2; echo "$parts" >&2; exit 1

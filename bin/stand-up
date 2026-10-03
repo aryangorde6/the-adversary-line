@@ -1,0 +1,73 @@
+#!/usr/bin/env bash
+# Stand the factory up in your own Band account: one seat per file in mandates/.
+#
+#   bin/stand-up --owner <your Band username> --work <absolute work dir> --kickoff <absolute spec package dir>
+#
+# For each mandates/<seat>.md it creates a Band-owned OpenCode seat named after the file,
+# on the model named by the file's `Model:` line, launched through bin/seat.jail, with the
+# mandate attached as the seat's standing instructions. Handles inside the mandates are
+# rewritten from the original owner to yours (into mandates/.yours/, originals untouched).
+# Needs: Band Desktop 0.4.10+ signed in (`band init`), its daemon running, OpenCode, bwrap.
+set -euo pipefail
+HERE=$(cd "$(dirname "$0")/.." && pwd)
+OWNER="" WORK="" KICKOFF="" ORIG_OWNER=aryangorde6
+while [[ $# -gt 0 ]]; do case $1 in
+  --owner) OWNER=$2; shift 2;; --work) WORK=$2; shift 2;; --kickoff) KICKOFF=$2; shift 2;;
+  *) echo "unknown argument $1" >&2; exit 2;; esac; done
+[[ -n $OWNER && $WORK == /* && $KICKOFF == /* ]] || { echo "usage: $0 --owner <band username> --work <absolute dir> --kickoff <absolute dir>" >&2; exit 2; }
+# The jail needs OpenCode's native binary (the npm wrapper needs node, which the jail hides).
+# The jail runs $OC_BIN/opencode: the binary must be native and named `opencode`. The command can
+# resolve to the npm wrapper, or to a native copy under another name (`opencode.exe`); then use the
+# platform package's binary.
+OC=$(readlink -f "$(command -v opencode)")
+if ! file "$OC" | grep -q ELF || [[ $(basename "$OC") != opencode ]]; then
+  OC=$(find "$(dirname "$OC")/../.." -path '*opencode-linux-*/bin/opencode' -type f 2>/dev/null | awk '{ print length, $0 }' | sort -n | cut -d' ' -f2- | while read -r c; do "$c" --version >/dev/null 2>&1 && echo "$c" && break; done)
+fi
+[[ -x $OC ]] || { echo "cannot find a runnable opencode binary" >&2; exit 1; }
+OC=$(readlink -f "$OC")
+printf '# Written by bin/stand-up. Absolute paths the seats may use.\nWORK=%s\nKICKOFF=%s\nOC_BIN=%s\n' "$WORK" "$KICKOFF" "$(dirname "$OC")" > "$HERE/bin/seat.conf"
+mkdir -p "$WORK" "$HERE/mandates/.yours" "$HERE/logs"
+band daemon status >/dev/null || { echo "Band daemon is not running: open Band Desktop or run 'band daemon run'" >&2; exit 1; }
+# Seats on a keyed provider reach it through bin/key-proxy, which runs here, outside every jail,
+# and holds the key (from ~/.config/band-hack/keys.env); seats name the model and never see the key.
+if grep -qh '^Model:[[:space:]]*nvidia/' "$HERE"/mandates/*.md \
+   && ! curl -sf -m 5 -o /dev/null "http://127.0.0.1:${KEY_PROXY_PORT:-18911}/v1/models"; then
+  systemd-run --user --unit=band-key-proxy "$(command -v python3)" "$HERE/bin/key-proxy" --log "$HERE/logs/key-proxy.log" >/dev/null \
+    || { nohup python3 "$HERE/bin/key-proxy" --log "$HERE/logs/key-proxy.log" >/dev/null 2>&1 & }
+  echo "started bin/key-proxy (NVIDIA models; key stays outside the seats)"
+fi
+# A seat whose model says "retry in ten hours" waits that long inside its turn; bin/wake-seats
+# wakes it once the model answers again (outside the jails, one short request per check).
+# Seats start services and containers to check their work and often leave them running; on a
+# 7 GB laptop they fill memory within a stage. bin/mem-guard removes what they left behind.
+if ! pgrep -f "$HERE/bin/mem-guard" >/dev/null; then
+  systemd-run --user --unit=band-mem-guard "$(command -v python3)" "$HERE/bin/mem-guard" >/dev/null \
+    || { nohup python3 "$HERE/bin/mem-guard" >/dev/null 2>&1 & }
+  echo "started bin/mem-guard (removes services and containers the seats left running)"
+fi
+if ! pgrep -f "$HERE/bin/wake-seats" >/dev/null; then
+  systemd-run --user --unit=band-wake-seats "$(command -v python3)" "$HERE/bin/wake-seats" >/dev/null \
+    || { nohup python3 "$HERE/bin/wake-seats" >/dev/null 2>&1 & }
+  echo "started bin/wake-seats (wakes seats whose model is back after a usage limit)"
+fi
+
+for f in "$HERE"/mandates/*.md; do
+  seat=$(basename "$f" .md)
+  title="$(tr '[:lower:]' '[:upper:]' <<< "${seat:0:1}")${seat:1}"
+  model=$(sed -n 's/^Model:[[:space:]]*//p' "$f" | head -1)
+  mine="$HERE/mandates/.yours/$seat.md"
+  sed "s#@$ORIG_OWNER/#@$OWNER/#g; s#\`$ORIG_OWNER\`#\`$OWNER\`#g" "$f" > "$mine"
+  ln -sfn seat.jail "$HERE/bin/seat-$seat"
+  echo "== $title ($model)"
+  if ! band list 2>/dev/null | grep -q "\[df-$seat\]"; then
+    band agent create --session "df-$seat" --name "$title" --description "$(grep -v -E '^(#|Harness:|Model:|Fallback model:|[[:space:]]*$)' "$f" | head -1 | cut -c1-120)" \
+      --transport opencode --runtime-model "$model" \
+      --spawn-command "$HERE/bin/seat-$seat" --spawn-arg acp --spawn-cwd "$WORK" --cwd "$WORK"
+  fi
+  # The model lives in per-session settings; the template flag alone does not set it.
+  band runtime --session "df-$seat" settings --model "$model" >/dev/null
+  band runtime template --session "df-$seat" set --spawn-command "$HERE/bin/seat-$seat" --spawn-arg acp --spawn-cwd "$WORK" >/dev/null
+  band agent instructions --session "df-$seat" set --instructions-file "$mine" >/dev/null
+done
+band list
+echo "Next: bin/open-room to create a room with every seat and you in it."

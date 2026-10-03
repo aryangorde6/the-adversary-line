@@ -1,0 +1,24 @@
+#!/usr/bin/env bash
+# The result repository has one working tree, and every seat works in it. A seat that checks out
+# another commit there moves every other seat's files too (a practice run's checker did, to look
+# at an older commit; the builder would have woken up on it). Only the Builder moves that
+# checkout; any other seat's checkout there is undone and the command fails with a pointer to a
+# private copy. Copies under /tmp (clones, worktrees) are the seat's own and are left alone.
+# Git passes: previous HEAD, new HEAD, 1 for a branch or commit checkout (0 for single files).
+seat=${SEAT_NAME:-}
+[[ -z $seat || $seat == builder || -n ${SEAT_HOOK_UNDO:-} ]] && exit 0
+[[ ${3:-0} == 1 && $1 != 0000000000000000000000000000000000000000 ]] || exit 0
+# Same commit and same branch (e.g. checking out the branch already checked out): nothing moved.
+# A new branch at the same commit still moves everyone's next commit, so that counts.
+[[ $1 == "$2" && $(git rev-parse -q --abbrev-ref '@{-1}' 2>/dev/null) == "$(git symbolic-ref -q --short HEAD)" ]] && exit 0
+top=$(git rev-parse --show-toplevel 2>/dev/null) || exit 0
+case $top in /tmp/*) exit 0 ;; esac
+# SEAT_WORK is the work area; its direct children are the shared result repositories.
+[[ -n ${SEAT_WORK:-} && $(dirname "$top") != "${SEAT_WORK%/}" ]] && exit 0
+SEAT_HOOK_UNDO=1 git checkout -q - 2>/dev/null || SEAT_HOOK_UNDO=1 git checkout -q "$1"
+now=$(git symbolic-ref -q --short HEAD || git rev-parse --short HEAD)
+{ echo "post-checkout: as ${seat^} you may not move the checkout of $top: every seat works in that folder, so it moved theirs too. Undone: it is back on $now."
+  echo "To look at another commit, use a copy of your own:"
+  echo "  git clone -q $top /tmp/check-${2:0:7} && git -C /tmp/check-${2:0:7} checkout -q ${2:0:7}"
+} >&2
+exit 1

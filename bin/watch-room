@@ -1,0 +1,19 @@
+#!/usr/bin/env bash
+# Emit one line per new room message worth acting on: agent text, errors, permission asks.
+# usage: watch-room <room-id> [interval-seconds] [since, e.g. 2026-09-29T14:55:00Z]
+R=$1; I=${2:-20}; last=${3:-}
+while true; do
+  # The newest page holds 100 messages of every type; a burst of tool calls can push a seat's text
+  # off it between polls, so text messages are also read on their own page.
+  # A call can hang while the daemon is busy; a hung call would freeze the watch, so each is bounded.
+  out=$({ timeout 60 band room messages "$R" --type text; timeout 60 band room messages "$R"; } 2>/dev/null | grep -E '^[0-9]{4}-[0-9]{2}-[0-9]{2}T' | sort -u) || true
+  while IFS= read -r line; do
+    ts=${line%% *}
+    [[ -z "$last" || "$ts" > "$last" ]] || continue
+    if [[ "$line" =~ \[(text|error)\] ]] || { [[ "$line" =~ \[task\] ]] && [[ ! "$line" =~ \"granted\":true ]] && [[ "$line" =~ (permission|approv|[Ee]rror|[Ff]ailed|timed out|crash|stopped) ]]; } || [[ "$line" =~ \"is_error\":true ]]; then
+      echo "${line:0:260}"
+    fi
+  done <<< "$out"
+  newest=$(tail -1 <<< "$out" | cut -d' ' -f1); [[ -n "$newest" && "$newest" > "$last" ]] && last=$newest
+  sleep "$I"
+done

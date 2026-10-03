@@ -1,0 +1,33 @@
+@{{OWNER}}/foreman New task. Build the service specified below, one stage at a time, from stage {{FIRST}} through stage {{LAST}}.
+
+## Where things are
+
+- Result repository (absolute path; every seat commits here and nowhere else): {{REPO}}
+- Specification and supplied checks (read-only): {{KICKOFF}}
+  - The specification for stage N is the file tablekeeper/spec/stage-N.md there. Every seat you hand work to must receive the complete text of the relevant stage file(s) pasted in the handoff; they cannot open the room history.
+  - Supplied checks run only through the harness command below; seats never open or copy the check files. They are only a sample of what is graded: roughly 83% of stage 1, 41% of stage 2, 11% of stage 3 and 21% of stage 4 are shipped. The rest are hidden, and every hidden check is written in the specification. Build to the specification, never to the supplied checks.
+- Write check output under {{CHECKS}}/ — a new directory name for every run.
+
+## Stage folders
+
+- Stage N lives in {{REPO}}/stage-N/ and is a complete, buildable service on its own: source, a Dockerfile, and a RUN.md whose command builds and starts it with no manual steps.
+- Stage 1 starts from an empty folder. Each later stage starts as a copy of the accepted previous stage folder (delete any .git inside the copy), then is widened to the new stage's specification. Earlier folders are never changed after they are accepted.
+- A stage folder must hold the solution to its own stage and not a later one.
+
+## How a stage is checked
+
+From {{KICKOFF}}, with its virtual environment:
+
+    .venv/bin/python -m harness run --track tablekeeper --repo {{REPO}} --stage N --out {{CHECKS}}/sN-<new number>
+
+Acceptance uses the same command with --mode isolated added (no network at run time, 2 vCPU, 2 GiB — how it is graded). The last line for a good stage-N folder reads "claimed stage: N on the shipped checks". For stages 1–3 the extra line for suite N+1 failing is expected and correct.
+
+## Constraints
+
+- Any language. The runtime image has no network access; install everything at image build time.
+- Nothing may be copied from existing products' code, API documentation or schemas.
+- This is a dark-factory run: this message is the only human input. Decide everything else inside the band and record decisions in the room.
+
+## Done
+
+Post the final report when stage {{LAST}} is accepted, or when the band cannot proceed.

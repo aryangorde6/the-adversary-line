@@ -1,0 +1,101 @@
+#!/usr/bin/env bash
+# Check every seat is clean and correctly configured before a run. Fixes what is safe to fix.
+#
+#   RUN_REPO=<repo dir name> bin/preflight-run [--keep-room <room-id>] [--fix]
+#
+# Checks, per seat in mandates/: the seat exists and is connected; its launcher is the jail
+# with the `acp` argument; its default session runs the model its mandate names; it has no
+# live session in any room except --keep-room; its inbox is empty. Then: a seat can reach Docker
+# and run the harness from inside its jail, the mandates pass the vocabulary scan, Band's daemon is
+# at rest, and there is memory to spare.
+# With --fix: detaches sessions in other rooms and acknowledges stale inbox items.
+set -uo pipefail
+HERE=$(cd "$(dirname "$0")/.." && pwd); KEEP="" FIX=0 BAD=0
+while [[ $# -gt 0 ]]; do case $1 in --keep-room) KEEP=$2; shift 2;; --fix) FIX=1; shift;; *) exit 2;; esac; done
+ok()   { printf '  [ok]   %s\n' "$*"; }
+bad()  { printf '  [FAIL] %s\n' "$*"; BAD=$((BAD+1)); }
+note() { printf '  [fix]  %s\n' "$*"; }
+source "$HERE/bin/seat.conf"
+
+for f in "$HERE"/mandates/*.md; do
+  seat=$(basename "$f" .md); model=$(sed -n 's/^Model:[[:space:]]*//p' "$f" | head -1)
+  echo "== $seat"
+  line=$(band list 2>/dev/null | grep "\[df-$seat\]") || { bad "seat does not exist (run bin/stand-up)"; continue; }
+  [[ $line == *Connected* ]] && ok "connected" || { bad "not connected: $line"; [[ $FIX == 1 ]] && band onboard --session "df-$seat" >/dev/null 2>&1 && note "revived with onboard"; }
+  t=$(band runtime template --session "df-$seat" show --json 2>/dev/null)
+  [[ $t == *'"spawn_arg_count":1'* && $t == *"\"spawn_command\":\"seat-$seat\""* ]] && ok "jailed launcher + acp" || bad "launcher/template wrong: $t"
+  [[ $(readlink "$HERE/bin/seat-$seat") == seat.jail ]] && ok "seat-$seat -> seat.jail" || bad "seat-$seat is not the jail"
+  m=$(band runtime --session "df-$seat" settings 2>/dev/null | sed -n 's/.*"model": "\(.*\)".*/\1/p')
+  [[ $m == "$model" ]] && ok "model $m" || bad "default session model is '$m', mandate says '$model'"
+  second=$(sed -n 's/^Fallback model:[[:space:]]*//p' "$f" | head -1 | awk '{print $1}')
+  if [[ -n $second ]]; then
+    [[ $second != "$model" ]] && ok "second model $second (carries the seat on while $model is capped)" || bad "Fallback model is the same as Model"
+  fi
+  while read -r hs room; do
+    [[ -z $hs || $hs == default || ${hs#default-} == "$KEEP" ]] && continue
+    if [[ $FIX == 1 ]]; then band detach --session "df-$seat" --host-session "$hs" >/dev/null 2>&1 && note "detached old room ${hs#default-}"
+    else bad "has a session in another room: ${hs#default-}"; fi
+  done < <(band sessions --session "df-$seat" 2>/dev/null | awk '{print $1}')
+  stale() { band inbox --session "df-$seat" 2>/dev/null | grep -E '^\[[0-9a-f-]{36}\] ' | { if [[ -n $KEEP ]]; then grep -vF "[$KEEP]"; else cat; fi; }; }
+  n=$(stale | grep -c .)
+  if [[ $n -gt 0 ]]; then
+    # Band refuses to settle a message from a room the seat has left (404); such a message waits in
+    # the unrouted queue, and no session of the seat can receive it while it is not in that room.
+    if [[ $FIX == 1 ]]; then acked=0 left=0
+      for id in $(stale | awk '{print $2}'); do
+        if band ack --session "df-$seat" "$id" >/dev/null 2>&1; then acked=$((acked+1)); else left=$((left+1)); fi
+      done
+      [[ $acked -gt 0 ]] && note "acknowledged $acked stale inbox item(s)"
+      if [[ $left -gt 0 ]]; then
+        rooms=$(stale | grep -oE '^\[[0-9a-f-]{36}\]' | tr -d '[]' | sort -u)
+        member=""; for r in $rooms; do band room participants "$r" 2>/dev/null | grep -q "^[^ ]*/$seat " && member+="$r "; done
+        [[ -z $member ]] && ok "$left queued item(s) from rooms it has left (Band will not settle them; no session of this seat can receive them)" \
+          || bad "$left queued item(s) could not be settled, from rooms it is still in: $member"
+      fi
+    else bad "$n stale item(s) from other rooms in inbox"; fi
+  else ok "inbox empty"; fi
+done
+
+echo "== environment"
+# Test from inside a seat's jail, where the checks actually run.
+j=$(ls "$HERE"/bin/seat-* | head -1)
+SEAT_JAIL_TEST='docker info >/dev/null 2>&1' "$j" >/dev/null 2>&1 && ok "a seat can reach Docker" || bad "a seat cannot reach Docker (docker group membership, see FACTORY.md)"
+SEAT_JAIL_TEST="cd '$KICKOFF' && .venv/bin/python -m harness run --help >/dev/null 2>&1" "$j" >/dev/null 2>&1 && ok "a seat can run the harness" || bad "a seat cannot run the harness from $KICKOFF/.venv"
+[[ -x $OC_BIN/opencode && -d $WORK && -d $KICKOFF ]] && ok "seat.conf paths exist" || bad "seat.conf paths missing"
+# A seat on a keyed provider reaches it only through bin/key-proxy (the key never enters a seat).
+if grep -qh '^Model:[[:space:]]*nvidia/' "$HERE"/mandates/*.md; then
+  curl -sf -m 15 -o /dev/null "http://127.0.0.1:${KEY_PROXY_PORT:-18911}/v1/models" && ok "key proxy answering for the NVIDIA-hosted seats" \
+    || bad "a mandate names an NVIDIA model but bin/key-proxy is not answering (bin/stand-up starts it)"
+fi
+pgrep -f "$HERE/bin/mem-guard" >/dev/null && ok "bin/mem-guard running (removes services and containers the seats left running)" \
+  || bad "bin/mem-guard is not running: leftover services and containers fill memory within a stage (bin/stand-up starts it)"
+pgrep -f "$HERE/bin/wake-seats" >/dev/null && ok "bin/wake-seats running (wakes seats after a usage limit)" \
+  || bad "bin/wake-seats is not running: a seat capped by its model would wait ~10 h (bin/stand-up starts it)"
+# Seats see the whole work area: anything left from an earlier run (a repository, a message file)
+# gets read as if it belonged to this one. Only the run's own repository and checks/ may be there.
+extra=$(cd "$WORK" && ls -A | grep -vx checks | grep -vx "${RUN_REPO:-}" | tr '\n' ' ')
+[[ -z $extra ]] && ok "work area holds nothing from earlier runs" || bad "work area has leftovers, move them outside $WORK: $extra"
+( cd "$KICKOFF" && .venv/bin/python - "$HERE/mandates" <<'PY'
+import pathlib, sys
+from harness import vocabulary as v
+hits = [(f.name, n, x) for t in ("tablekeeper", "pocketful", "toy") for f in sorted(pathlib.Path(sys.argv[1]).glob("*.md"))
+        for n, l in enumerate(f.read_text().splitlines(), 1) for _, x in v.terms_in(l) if x in set(v.for_track(t))]
+print("  [ok]   mandates clean against every track" if not hits else f"  [FAIL] mandate names track vocabulary: {hits}")
+sys.exit(1 if hits else 0)
+PY
+) || BAD=$((BAD+1))
+# Band's daemon relays every message. On 30 Sep it spun on 4-5 of this machine's 8 cores for the whole
+# run (Band 0.4.12), and the seats and their checks shared what it left. Between runs it should use
+# almost nothing.
+if pid=$(pgrep -x jamd | head -1); then
+  hz=$(getconf CLK_TCK); used() { sed 's/.*) //' "/proc/$pid/stat" | awk '{print $12+$13}'; }
+  a=$(used); sleep 3; b=$(used); pct=$(( (b-a)*100/(3*hz) ))
+  [[ $pct -lt 50 ]] && ok "Band's daemon at rest (${pct}% CPU)" \
+    || bad "Band's daemon uses ${pct}% CPU with no run going (a busy loop: it takes that CPU from the seats); restart it while no run is going, then check again"
+  # Band 0.4.12 also polls each running seat's output in a loop (~1.2 cores per seat); two worker
+  # threads cap that at 2 cores (FACTORY.md, Stand it up, step 2).
+  tr '\0' '\n' < "/proc/$pid/environ" 2>/dev/null | grep -q '^TOKIO_WORKER_THREADS=' && ok "Band's daemon has its worker threads capped" \
+    || bad "Band's daemon runs without TOKIO_WORKER_THREADS: each running seat would cost it about a core; restart it as in FACTORY.md step 2"
+else bad "Band's daemon (jamd) is not running"; fi
+avail=$(free -m | awk 'NR==2{print $7}'); [[ $avail -gt 2000 ]] && ok "${avail} MB memory available" || bad "only ${avail} MB memory available"
+echo; [[ $BAD == 0 ]] && echo "preflight: ready" || { echo "preflight: $BAD problem(s)"; exit 1; }

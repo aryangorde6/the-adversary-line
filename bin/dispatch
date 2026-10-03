@@ -1,0 +1,29 @@
+#!/usr/bin/env bash
+# Post a task file to the room as you, addressed to the coordinating seat. Records the time.
+#   bin/dispatch <room-id> <task-file> [--lead foreman]
+#   RUN_REPO=<repository folder> [STAGES=1-4] bin/dispatch <room-id> dispatch/<name>.md.tmpl
+# A .tmpl file is filled in first from bin/seat.conf (written by bin/stand-up): {{REPO}} the run's
+# repository, {{CHECKS}} its check-output folder, {{KICKOFF}} the specification package,
+# {{FIRST}}/{{LAST}} the stages, {{OWNER}} your Band handle. The filled message is kept in logs/.
+set -euo pipefail
+HERE=$(cd "$(dirname "$0")/.." && pwd); ROOM=$1 FILE=$2 LEAD=${4:-foreman}
+id=$(band room participants "$ROOM" | sed -n "s#^[^ ]*/$LEAD .*id=\([0-9a-f-]\{36\}\)).*#\1#p")
+[[ -n $id ]] || { echo "no $LEAD in room $ROOM" >&2; exit 1; }
+if [[ $FILE == *.tmpl ]]; then
+  # shellcheck source=/dev/null
+  source "$HERE/bin/seat.conf"
+  : "${RUN_REPO:?set RUN_REPO to the run repository folder name under $WORK}"
+  [[ -d $WORK/$RUN_REPO/.git ]] || { echo "$WORK/$RUN_REPO is not a git repository" >&2; exit 1; }
+  owner=$(band whoami | grep -o '@[A-Za-z0-9_-]*' | head -1 | tr -d @)
+  stages=${STAGES:-1-4}
+  body=$(sed -e "s#{{REPO}}#$WORK/$RUN_REPO#g" -e "s#{{CHECKS}}#$WORK/checks/$RUN_REPO#g" \
+             -e "s#{{KICKOFF}}#$KICKOFF#g" -e "s#{{FIRST}}#${stages%-*}#g" -e "s#{{LAST}}#${stages#*-}#g" \
+             -e "s#{{OWNER}}#$owner#g" "$FILE")
+  if grep -q '{{' <<< "$body"; then echo "unfilled placeholder in $FILE: $(grep -o '{{[A-Z]*}}' <<< "$body" | sort -u | tr '\n' ' ')" >&2; exit 1; fi
+  mkdir -p "$WORK/checks/$RUN_REPO"
+  printf '%s\n' "$body" > "$HERE/logs/dispatch-$ROOM.md"
+else
+  body=$(cat "$FILE")
+fi
+date -u +%FT%TZ | tee "$HERE/logs/dispatch-$ROOM.utc"
+band room send "$ROOM" --mention "$id" "$body"

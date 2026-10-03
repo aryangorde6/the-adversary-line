@@ -1,0 +1,49 @@
+#!/usr/bin/env bash
+# After the machine restarts in the middle of a run: start again what the run needs outside the
+# seats, then say what came back.
+#
+#   bin/resume-host
+#
+# Starts Band's daemon with the settings of step 2 in FACTORY.md if it is not running, then the
+# services bin/stand-up starts (memory guard, wake service, key proxy for NVIDIA-hosted seats),
+# and bin/net-watch, which rejoins the Wi-Fi if the machine drops off the network.
+# The daemon brings the seats back by itself. This posts nothing and starts, stops or changes no
+# seat. A seat that was inside a turn when the machine went down comes back on a new, empty
+# session; it reads the room first, as its mandate says.
+set -uo pipefail
+HERE=$(cd "$(dirname "$0")/.." && pwd)
+# `band daemon status` exits 0 and prints "daemon not running" when it is down, so read what it says.
+daemon_up() { local s; s=$(band daemon status 2>&1) || return 1; [[ -n $s && $s != *"not running"* && $s != *unavailable* ]]; }
+
+if ! daemon_up; then
+  env=(--setenv=TOKIO_WORKER_THREADS=2 --setenv=JAM_OWNED_RUNTIME_IDLE_SECS=900 --setenv=JAM_QUESTION_TIMEOUT_SECS=60)
+  if ! systemd-run --user --unit=band-jamd "${env[@]}" "$(command -v jamd)" >/dev/null 2>&1; then
+    TOKIO_WORKER_THREADS=2 JAM_OWNED_RUNTIME_IDLE_SECS=900 JAM_QUESTION_TIMEOUT_SECS=60 \
+      setsid nohup sg docker -c 'band daemon run' >>"$HERE/logs/band-daemon.log" 2>&1 &
+  fi
+  for _ in $(seq 30); do daemon_up && break; sleep 1; done
+  daemon_up || { echo "resume-host: Band's daemon did not start (see step 2 in FACTORY.md)" >&2; exit 1; }
+  echo "started Band's daemon (two worker threads, idle seats parked, no waiting on humans)"
+else
+  echo "Band's daemon is running"
+fi
+
+if grep -qh '^Model:[[:space:]]*nvidia/' "$HERE"/mandates/*.md \
+   && ! curl -sf -m 5 -o /dev/null "http://127.0.0.1:${KEY_PROXY_PORT:-18911}/v1/models"; then
+  systemd-run --user --unit=band-key-proxy "$(command -v python3)" "$HERE/bin/key-proxy" --log "$HERE/logs/key-proxy.log" >/dev/null \
+    || { nohup python3 "$HERE/bin/key-proxy" --log "$HERE/logs/key-proxy.log" >/dev/null 2>&1 & }
+  echo "started bin/key-proxy"
+fi
+for svc in mem-guard wake-seats net-watch; do
+  [[ -x $HERE/bin/$svc ]] || continue
+  if pgrep -f "$HERE/bin/$svc" >/dev/null; then echo "bin/$svc is running"; continue; fi
+  systemd-run --user --unit="band-$svc" "$HERE/bin/$svc" >/dev/null \
+    || { nohup "$HERE/bin/$svc" >/dev/null 2>&1 & }
+  echo "started bin/$svc"
+done
+
+systemd-inhibit --list --no-pager 2>/dev/null | grep -q 'handle-lid-switch' && echo "the lid switch is inhibited" \
+  || echo "the lid switch is NOT inhibited; in a terminal you keep open: systemd-inhibit --what=handle-lid-switch --why=\"run in progress\" sleep infinity"
+
+sleep 10
+echo "seats:"; band list 2>/dev/null | grep '\[df-' | sed 's/^/  /'

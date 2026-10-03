@@ -1,0 +1,9 @@
+
+# Written by bin/stand-up and the seat launcher on each machine
+bin/seat.conf
+bin/seat-*
+mandates/.yours/
+!bin/seat-hooks/
+run/
+logs/
+__pycache__/

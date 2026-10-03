@@ -1,0 +1,742 @@
+#!/usr/bin/env python3
+"""Sits between Band and a seat's runtime on the agent protocol stream (newline-delimited
+JSON-RPC over stdio) and turns a "nothing to say" turn into a silent one.
+
+Band posts the text a seat writes after its last tool call as a reply, and a reply wakes the
+sender. Models cannot reliably end a turn with no text at all: asked to stay silent they write
+"No reply needed." or "Silent completion.", which wakes the other seat, which answers in kind.
+Mandates ask for the single word SILENT instead; this filter holds each turn's closing text
+until the turn ends and drops it when it is only that word (or one of the short phrases seen
+in practice runs), so Band records a silent completion. Everything else passes through
+unchanged and in order.
+
+The free model gateway occasionally returns degenerate text (a Latin stream shot through with
+several unrelated scripts). Posted, it reaches the room as noise; dropped, the sender waits
+forever. A garbled closing text is replaced by one short notice asking the sender to resend.
+
+The free gateway also rate-limits a model once a run has used enough of it (HTTP 429, no hint
+of when it lifts; still refused a quarter of an hour later). The runtime retries for about a
+minute, then fails the turn, and Band stops a runtime whose turn failed: the seat drops out
+mid-task. Instead, a turn that failed on a rate limit (or a gateway timeout) is held open: the
+room gets one visible note, the filter waits with growing pauses, then asks the runtime to carry
+on where it stopped, in the same session. Band sees one long turn that ends normally.
+
+When the provider does say when the limit lifts, the runtime waits that long inside the turn —
+for the free gateway's cap, ten hours, although the model is usually back within four. On
+SIGUSR1 (sent by bin/wake-seats once the model answers again) the filter cancels a turn that
+has gone quiet and resumes it the same way, in the same session.
+
+A seat can name a second model on a separate quota (ACP_QUIET_FALLBACK, from its mandate's
+`Fallback model:` line; ACP_QUIET_MODEL is its `Model:` line). The free gateway caps a model
+after about a thousand requests and lifts the cap one to four hours later; with a second model
+the seat carries on instead of waiting. A turn that fails on a rate limit resumes at once on the
+second model; on SIGUSR2 (bin/wake-seats: the seat's model still refuses, the second answers) a
+turn that has gone quiet is cancelled and resumed on the second model; on SIGUSR1 the seat goes
+back to its own model, at once when it is waiting and otherwise at its next turn. The session,
+its history and its tools stay the same; only the model behind the next request changes. The
+filter also reads its runtime's log (ACP_QUIET_RUNTIME_LOG): a request of a turn in progress
+refused on the seat's own model moves that turn to the second model within seconds, without
+waiting for bin/wake-seats — a runtime Band starts fresh during a cap begins on the seat's own
+model and would otherwise sit out the watchdog's interval.
+
+A seat receives one message per turn, oldest first, with no send time. A message that arrives
+right after the previous turn ended was waiting in that queue: the filter reads the room and folds
+every newer message to the seat into the same turn, each with its send time, and settles those
+messages at once, without the model, when they come up in the queue (see FOLD below).
+
+usage: acp-quiet <runtime> [args...]      (the launcher wraps `opencode acp` with it)
+"""
+import calendar, itertools, json, os, random, re, signal, subprocess, sys, threading, time
+
+# Phrases a model writes when it means "nothing to say". A turn's closing text counts as
+# silence only if it is made of nothing else, and is short.
+SILENT = sorted(["silent turn", "silent completion", "silent", "no reply needed", "no reply",
+                 "no response needed", "no action required", "no action needed", "nothing to add",
+                 "acknowledged", "noted", "receipt", "received", "understood", "got it", "thanks", "thank you"],
+                key=len, reverse=True)
+LEADING_SILENT = ["silent turn", "silent completion", "silent", "no reply needed", "no reply required",
+                  "no response needed", "no response required", "no action needed", "no action required",
+                  "nothing to add", "nothing further"]
+FLUSH_ON = {"tool_call", "tool_call_update"}
+# A turn that already posted its message through the band CLI needs no closing text: a closing
+# "Handoff sent (message 40d4a6f1)." is posted as a second reply and wakes the other seat again.
+# A send is a band/jam `send` naming a room (its id, or a variable holding it) — not a later piped
+# command, and not the word in prose.
+SENT_RE = re.compile(rb"\b(?:band|jam)\b[^|;&\n]{0,200}?\s(?:room\s+)?send\s+(?:[0-9a-f]{8}-[0-9a-f-]{27}|\$\{?\w|\\?\"\$)")
+RECEIPT_MAX = 300  # characters: a shorter closing text after a send is dropped ...
+# ... and so is one that opens by saying the message went out ("Verdict sent (message 840850cb). Summary: …"):
+# that is a second copy of what was just sent, however long.
+OPENS_AS_RECEIPT = re.compile(r"^(?:the\s+)?(?:(?:verdict|handoff|report|message|reply|answer|ruling|findings?|"
+                              r"summary|status|update|note)\s+(?:was\s+|has\s+been\s+)?)?(?:sent|posted|delivered)\b", re.I)
+# ... or whose first sentence says the work went out ("Ledger committed as `c87b62a` and reported to the room."):
+FIRST_SENTENCE_SENT = re.compile(r"^[^\n.!?]{0,160}?\b(?:and|then)\s+(?:reported|sent|posted|announced)\b", re.I)
+# Any other closing text after a send is a report written for a reader who is not there ("Broke the
+# loop with a blunt stop… Three things went out:"). In the submitted run 65 of the Foreman's first 86
+# sending turns closed that way (83 KB; every one of them from the fifth hour on); each reached the seat
+# that woke the turn as one more message to answer, one of them telling the Adversary it was "dead as a
+# verifier". It is shown as a thought: still visible in the room, delivered to no seat.
+
+
+def opens_as_receipt(text: str) -> bool:
+    t = re.sub(r"^(?:\s*@\[\[[^\]]*\]\]|\s*@[\w/-]+)+", "", text)  # leading mentions
+    t = re.sub(r"^[\s*_#>`-]+", "", t)
+    return bool(OPENS_AS_RECEIPT.match(t) or FIRST_SENTENCE_SENT.match(t))
+
+
+def ends_silent(text: str) -> bool:
+    """The model closed with the bare word SILENT: after a send, whatever came before it is a receipt."""
+    return bool(re.search(r"SILENT[\s.*_`]*$", text))
+GARBLED_NOTICE = ("The model behind this seat returned unreadable text for this turn, so it was "
+                  "withheld. Please send your last message to this seat again.")
+
+# Failed turns worth resuming, and the pauses before each resume, in seconds. A rate limit
+# lifts on the provider's clock, so its pauses grow long; a gateway timeout is usually brief.
+# ACP_QUIET_PAUSES="rate=a,b,c;gateway=x,y" overrides them (tests use seconds).
+PAUSES = {"rate": [180, 360, 720, 1200, 1800, 1800, 1800, 1800, 1800, 1800],  # up to ~3.6 h
+          "gateway": [60, 120, 240],
+          # A lost connection (the laptop's network dropped for 51 min on 29 Sep and 76 min on 30 Sep):
+          # passed through, the failed turn made Band retire the runtime and start the seat again on a
+          # new, empty session, with the queued messages never delivered — the run stopped. Held open,
+          # the turn resumes in the same session once the network is back.
+          "network": [60, 120, 240, 480, 900, 1800, 1800, 1800, 1800, 1800, 1800]}  # up to ~3.8 h
+for part in filter(None, os.environ.get("ACP_QUIET_PAUSES", "").split(";")):
+    k, v = part.split("=", 1)
+    PAUSES[k.strip()] = [float(x) for x in v.split(",") if x.strip()]
+# A wake signal is acted on only when the runtime has been silent this long (seconds): a seat
+# that is working is never interrupted. ACP_QUIET_WAKE_AFTER overrides it (tests use seconds).
+QUIET_BEFORE_KICK = float(os.environ.get("ACP_QUIET_WAKE_AFTER", 600))
+# The seat's own model and its second model (see above); without a second model nothing changes.
+PRIMARY = os.environ.get("ACP_QUIET_MODEL") or None
+FALLBACK = os.environ.get("ACP_QUIET_FALLBACK") or None
+if FALLBACK == PRIMARY:
+    FALLBACK = None
+# A switch to the second model is acted on only when the runtime has been silent this long
+# (seconds): bin/wake-seats asks for it only when the seat's last request was refused.
+SWITCH_QUIET = float(os.environ.get("ACP_QUIET_SWITCH_AFTER", 150))
+# The runtime's own log (ACP_QUIET_RUNTIME_LOG, inside the jail). With a second model, the filter
+# reads it for a refused request of a turn in progress and moves that turn to the second model at
+# once — a fresh runtime starts on the seat's own model and, during a cap, would otherwise wait
+# for bin/wake-seats' next look (up to its interval plus three quiet minutes).
+RUNTIME_LOG = os.environ.get("ACP_QUIET_RUNTIME_LOG") or None
+REFUSED_LINE = re.compile(r"rate limit|too many requests|freeusagelimit|usage limit|statuscode.?429", re.I)
+# The human's message is the task: a turn that answers it must act. A model once answered a
+# four-stage dispatch with only SILENT, and nothing would ever have woken it again.
+FROM_HUMAN = re.compile(r"^From: [^\n]*\((?:User|Human)\)\s*$", re.M)
+NUDGE_TEXT = ("The message you just answered came from the human, and it is your task: it needs your "
+              "action, not SILENT. Read it again and start the work it asks for now.")
+RESUME_TEXT = ("The last request to the model service failed ({why}), so this turn was paused for "
+               "{mins} and is now resumed. Carry on with what you were doing, from where you stopped. "
+               "Do not announce that you are carrying on: any text you write before your next tool call "
+               "is posted to the room as a message.")
+
+
+# A seat receives one message per turn, oldest first, and a delivered message does not say when it
+# was sent. In the submitted run the Builder's queue never drained: five hours in, 49 messages
+# were waiting and the one it was handed had been sent 4 h 21 min earlier; the Adversary ran 20 to
+# 40 minutes behind. Each stale message still cost a turn, and answers to them reopened closed work.
+# A message that arrives right after the previous turn ended was waiting; for it the filter reads
+# the room once and folds every newer message to this seat into the same turn, with the send time
+# of each. When those messages later come up in the queue they are settled at once, without the
+# model: the seat has already seen them. Reading the room fails open (the message goes through as
+# it came). ACP_QUIET_FOLD=0 turns this off.
+FOLD = os.environ.get("ACP_QUIET_FOLD", "1") != "0"
+QUEUED_WITHIN = float(os.environ.get("ACP_QUIET_QUEUED_WITHIN", 5))  # seconds after a turn's end
+FOLD_MAX = 48000     # characters of newer messages folded into one turn, newest kept first
+FOLD_PAGES = 4       # room pages (100 texts each) searched for the waiting message
+WAITED_NOTE = 120    # seconds: a message that waited this long says so, even with nothing newer
+BAND = os.environ.get("ACP_QUIET_BAND", "band")
+INCOMING = re.compile(r"\[INCOMING BAND MESSAGE\]\s*From: (?P<frm>[^\n]*?)\s*\((?P<kind>\w+)\)\s*\n"
+                      r"Room: (?P<room>[0-9a-f-]{36})\s*\nMessage: (?P<msg>[0-9a-f-]{36})")
+
+
+def _hm(iso: str) -> str:
+    return iso[11:19] + "Z"
+
+
+def _took(secs: float) -> str:
+    m = int(secs // 60)
+    return f"{m // 60} h {m % 60} min" if m >= 60 else f"{m} min" if m else f"{int(secs)} s"
+
+
+def _band(*args) -> str:
+    return subprocess.run([BAND, *args], capture_output=True, text=True, timeout=10, check=True).stdout
+
+
+def fold_text(page, msg_id, me, skip, now=None):
+    """The note to add to a waiting message and the ids it delivers: every newer text in the room page
+    that names this seat (`me`), from another seat, not already delivered (`skip`), with its send time."""
+    this = next((x for x in page if x["id"] == msg_id), None)
+    # Not among the pages read: it is older than all of them, so every one of them is newer.
+    t0 = this["inserted_at"] if this else min((x["inserted_at"] for x in page), default="")
+    if not t0:
+        return "", []
+    waited = (now or time.time()) - calendar.timegm(time.strptime(t0[:19], "%Y-%m-%dT%H:%M:%S"))
+    sent = f"sent at {_hm(t0)} and waited {_took(waited)}" if this else f"sent before {_hm(t0)} and waited over {_took(waited)}"
+    newer = sorted((x for x in page if (x["inserted_at"] > t0 or not this) and x["id"] != msg_id
+                    and me in (x.get("mention_names") or {})
+                    and x.get("sender_id") != me and x.get("sender_type") == "Agent" and x["id"] not in skip),
+                   key=lambda x: x["inserted_at"])
+    seen = [x for x in page if (x["inserted_at"] > t0 or not this) and x["id"] in skip]
+    already = (f" You have already seen {len(seen)} newer message{'s' if len(seen) != 1 else ''} to you, up to "
+               f"{_hm(max(x['inserted_at'] for x in seen))}, in earlier turns." if seen else "")
+    kept, size = [], 0
+    for x in reversed(newer):  # the newest first: they carry the current state of things
+        body = re.sub(r"@\[\[([0-9a-f-]{36})\]\]", lambda g: "@" + (x.get("mention_names") or {}).get(g[1], g[1]), x.get("content") or "")
+        if kept and size + len(body) > FOLD_MAX:
+            break
+        kept.append((x, body)); size += len(body)
+    kept.reverse()
+    if not kept:
+        return (f"\n\n[Note from this seat's runtime: the message above was {sent} while your earlier "
+                f"turns ran.{already or ' Nothing newer to you has arrived since.'}]"
+                if waited >= WAITED_NOTE else ""), []
+    head = (f"\n\n[Note from this seat's runtime: the message above was {sent} "
+            f"while your earlier turns ran.{already} {len(kept)} {'more ' if seen else ''}newer message{'s' if len(kept) != 1 else ''} to you arrived "
+            f"meanwhile; {'they follow' if len(kept) != 1 else 'it follows'}, oldest first, and will not be "
+            f"delivered to you again. Act on the newest state of things: whatever a later message replaces or "
+            f"settles needs no answer. Your closing text is posted only as a reply to the message above; reach "
+            f"anyone else with a send.]")
+    parts = [f"\n\n--- {i} of {len(kept)}: from {x.get('sender_name') or '?'} at {_hm(x['inserted_at'])} "
+             f"(message {x['id']}) ---\n{body}" for i, (x, body) in enumerate(kept, 1)]
+    return head + "".join(parts), [x["id"] for x, _ in kept]
+
+
+def failure_kind(error) -> str | None:
+    """'rate', 'gateway' or 'network' for a failed turn that is worth resuming, else None."""
+    e = json.dumps(error).lower()
+    if "rate limit" in e or "too many requests" in e or '"statuscode": 429' in e:
+        return "rate"
+    if re.search(r'"statuscode": 50[234]|upstream idle timeout|overloaded', e):
+        return "gateway"
+    if re.search(r"cannot connect to api|unable to connect|typo in the url|econnrefused|econnreset|enotfound|"
+                 r"etimedout|eai_again|network is unreachable|fetch failed|socket hang up", e):
+        return "network"
+    return None
+
+
+def script_of(ch: str) -> str:
+    o = ord(ch)
+    for lo, hi, name in ((0, 0x250, "latin"), (0x370, 0x400, "greek"), (0x400, 0x530, "cyrillic"),
+                         (0x590, 0x600, "hebrew"), (0x600, 0x700, "arabic"), (0x900, 0x980, "devanagari"),
+                         (0xE00, 0xE80, "thai"), (0x3040, 0x3100, "kana"), (0x3400, 0xA000, "cjk"),
+                         (0xAC00, 0xD7B0, "hangul")):
+        if lo <= o < hi:
+            return name
+    return "other"
+
+
+def is_garbled(text: str) -> bool:
+    """Three or more non-Latin scripts, each with a few letters: never seen in a real reply
+    (checked against every text the seats wrote in practice), always in a degenerate one."""
+    counts = {}
+    for ch in text:
+        if ch.isalpha():
+            sc = script_of(ch)
+            counts[sc] = counts.get(sc, 0) + 1
+    return sum(1 for sc, k in counts.items() if sc not in ("latin", "other") and k >= 3) >= 3
+
+
+# A short one-line text that only says what the seat is about to do ("Now I'll add the test
+# cases.", "Now sending the verdict.") tells the other seat nothing: it is an acknowledgement,
+# which the mandates rule out, and posted it wakes the seat it names. Before a tool call it
+# becomes a thought (still visible in the room); as a turn's closing text it is dropped.
+INTENT = re.compile(r"^(?:(?:now|next|first|then|ok(?:ay)?|right|so)\b[,:]?\s+)?"
+                    r"(?:i'?ll|i\s+will|i\s+am\s+going\s+to|i'?m\s+going\s+to|let\s+me|let's|going\s+to|"
+                    r"(?:now\s+)?(?:sending|posting|writing|checking|starting|reading|looking|updating))\b", re.I)
+INTENT_MAX = 200
+# ... or names the next step with no verb at all ("Now the builder handoff."): short lines only.
+# Checked against every agent text of a practice run (222): none matches.
+STEP = re.compile(r"^(?:now|next|then)\b[,:]?\s+(?:the|a|an|my|our|on\s+to|onto)\b[^\n?]{0,70}$", re.I)
+STEP_MAX = 80
+STEP_KEEP = re.compile(r"\b(?:PASS|BLOCKED|FAIL(?:ED)?|verdict|[0-9a-f]{7,40})\b")  # a result, never narration
+
+
+# A model often narrates in one short line just before it acts ("The adversary lost the earlier
+# dispatch. Resending a compact handoff."). Posted, each line named the seat the turn answered and
+# woke it for nothing: in the submitted run's first half hour all seven one-line texts of 240
+# characters or fewer were the Foreman's, and each came just before a tool call. A single short line
+# streamed right before a tool call is shown as a thought; a longer text, or one that asks
+# something, stays a message.
+PRE_TOOL_MAX = 240
+
+
+def is_pre_tool_narration(text: str) -> bool:
+    t = re.sub(r"^(?:\s*@\[\[[^\]]*\]\]|\s*@[\w/-]+)+", "", text)  # leading mentions
+    t = re.sub(r"^[\s*_#>`-]+", "", t).strip()
+    return is_intent_only(text) or (0 < len(t) <= PRE_TOOL_MAX and "\n" not in t and "?" not in t)
+
+
+def is_intent_only(text: str) -> bool:
+    t = re.sub(r"^(?:\s*@\[\[[^\]]*\]\]|\s*@[\w/-]+)+", "", text)  # leading mentions
+    t = re.sub(r"^[\s*_#>`-]+", "", t).strip()
+    return (0 < len(t) <= INTENT_MAX and "\n" not in t and "?" not in t and bool(INTENT.match(t))) \
+        or (0 < len(t) <= STEP_MAX and bool(STEP.match(t)) and not STEP_KEEP.search(t))
+
+
+# When a session grows long the runtime compacts it: it asks the model for a summary in a fixed
+# template (## Objective, ## Important Details, ## Work State, ## Next Move, ## Relevant Files) and
+# streams that summary like a reply. Band then posted a seat's private notes to the room as its
+# answer (10 KB, twice in one practice morning) and the seat it named took them for a brief.
+# Text in that template is never a message: it is dropped wherever it appears.
+COMPACTION_HEADS = ("## Important Details", "## Work State", "## Next Move")
+
+
+def is_compaction_summary(text: str) -> bool:
+    t = re.sub(r"^(?:\s*@\[\[[^\]]*\]\]|\s*@[\w/-]+)+", "", text).lstrip()
+    return t.startswith("## Objective") and all(h in t for h in COMPACTION_HEADS)
+
+
+def held_text(held) -> str:
+    return "".join((((json.loads(l)["params"]["update"].get("content")) or {}).get("text") or "") for l in held)
+
+
+def as_thought(line: bytes) -> bytes:
+    m = json.loads(line)
+    m["params"]["update"]["sessionUpdate"] = "agent_thought_chunk"
+    return (json.dumps(m) + "\n").encode()
+
+
+def is_silence(text: str) -> bool:
+    t = " ".join(re.sub(r"[^a-z0-9]+", " ", text.lower()).split())
+    if not t:
+        return False
+    # A short text that opens by saying it needs no answer ("*Silent turn — the status was already
+    # posted.*") is a model explaining its silence; posted, it wakes the seat it answers.
+    if len(t) <= 500 and any(t == p or t.startswith(p + " ") for p in LEADING_SILENT):
+        return True
+    # "*No reply — noted; standing by for the consolidated hash.*": the model saying it is not replying,
+    # then why. In the submitted run the Adversary posted 16 in 40 minutes, each one waking the Foreman.
+    # Only with punctuation straight after: "No reply from the Builder in 20 minutes, so…" is a message.
+    raw = re.sub(r"^(?:\s*@\[\[[^\]]*\]\]|\s*@[\w/-]+)+", "", text)
+    if len(t) <= 500 and re.match(r"^[\s*_`>]*no (?:reply|response)(?: (?:needed|required|expected))?\s*[—–:;.,-]", raw, re.I):
+        return True
+    # A short text that ends with the bare word SILENT ("Receipt, no reply needed.SILENT") means
+    # silence too, unless it carries a result.
+    if len(text) <= 300 and re.search(r"SILENT[\s.*_`]*$", text) and not STEP_KEEP.search(text):
+        return True
+    if len(t) > 60:
+        return False
+    for phrase in SILENT:
+        t = t.replace(phrase, " ")
+    return not t.strip()
+
+
+# A longer text that still opens by declaring silence ("Silent. The four operating rules are a receipt
+# of my own rulings and need nothing from me; …", 599 and 689 characters, the Foreman twice in 30 s)
+# is the model's reasoning for not replying; posted, it woke the seat it named. Past the length at
+# which silence is dropped, it is shown as a thought: still in the room, delivered to no seat.
+OPENS_SILENT = re.compile(r"^[\s*_`>]*(?:silent(?: turn| completion)?|no (?:reply|response)(?: (?:needed|required|expected))?)"
+                          r"\s*[.:;—–-]", re.I)
+
+
+def opens_silent(text: str) -> bool:
+    return bool(OPENS_SILENT.match(re.sub(r"^(?:\s*@\[\[[^\]]*\]\]|\s*@[\w/-]+)+", "", text)))
+
+
+def note(msg: str) -> None:
+    """To stderr (Band's log) and, when the launcher provides one, to the seat's own log."""
+    print(msg, file=sys.stderr, flush=True)
+    path = os.environ.get("ACP_QUIET_LOG")
+    if path:
+        try:
+            with open(path, "a") as f:
+                f.write(f"{time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime())} {msg}\n")
+        except OSError:
+            pass
+
+
+def line_of(m) -> bytes:
+    return (json.dumps(m) + "\n").encode()
+
+
+def main():
+    child = subprocess.Popen(sys.argv[1:], stdin=subprocess.PIPE, stdout=subprocess.PIPE, bufsize=0)
+    lock, out_lock, in_lock = threading.Lock(), threading.Lock(), threading.Lock()
+    prompts = {}   # Band's request id of each turn in progress -> its session
+    resumes = {}   # our request id of a resumed turn -> Band's request id
+    paused = {}    # Band's request id -> {"session", "tries", "since", "timer", "waiting"} from a
+                   # turn's first failure until it really ends (tries count across resumes)
+    kicked = set()  # Band's request ids of turns this filter cancelled to wake them (SIGUSR1)
+    last_out = [time.time()]  # when the runtime last said anything
+    quiet_for = [0.0]  # how long the runtime had been silent when last woken
+    resume_no = itertools.count(1)
+    model = {}  # session -> the model its next request goes to, as last set by Band or by this filter
+    want = [PRIMARY]  # the model the seat should be on now; None once Band set a model of its own
+    own = {}  # this filter's model-switch request ids -> what to run once the runtime has answered
+    human = set()   # Band's request ids of turns that answer a message from the human
+    acted = {}      # session -> whether its current turn has called a tool
+    nudged = set()  # Band's request ids already sent back once for answering the human with silence
+    folded = set()  # room message ids already delivered inside an earlier turn (see FOLD)
+    delivered = set()  # room message ids the model has been given as a turn of their own
+    turn_end = [0.0]  # when the last turn ended: a message arriving right after it was waiting
+    me = {}         # room id -> this seat's participant id there
+    out = sys.stdout.buffer
+
+    def fold_waiting(room, msg_id):
+        """The note to add to a message that waited, and the ids of the messages it folds in."""
+        seat = os.environ.get("SEAT_NAME") or (os.environ.get("JAM_SESSION") or "").removeprefix("df-")
+        try:
+            if room not in me:
+                hit = re.search(rf"/{re.escape(seat)} \[[^\n]*?id=([0-9a-f-]{{36}})\)", _band("room", "participants", room)) if seat else None
+                me[room] = hit and hit[1]
+            page = []
+            for n in range(1, FOLD_PAGES + 1):
+                d = json.loads(_band("room", "messages", room, "--type", "text", "--json", "--page", str(n)))
+                page += d["messages"]
+                if any(x["id"] == msg_id for x in d["messages"]) or not d.get("has_more"):
+                    break
+        except Exception as e:  # fail open: the message goes through as it came
+            note(f"acp-quiet: could not read the room to fold waiting messages ({type(e).__name__}); delivered as it came")
+            return "", []
+        if not me[room]:
+            note(f"acp-quiet: seat {seat!r} not found among the room's participants; delivered as it came")
+            return "", []
+        try:
+            extra, ids = fold_text(page, msg_id, me[room], folded | delivered)
+        except Exception as e:  # an unexpected room page must never stop the input thread
+            note(f"acp-quiet: could not fold waiting messages ({type(e).__name__}: {e}); delivered as it came")
+            return "", []
+        if extra:
+            note(f"acp-quiet: message {msg_id[:8]} had waited; " + (f"folded in {len(ids)} newer message(s) to this seat" if ids else "noted its send time"))
+        return extra, ids
+
+    def target_for(sid):
+        """The model a session must be switched to before its next request, or None."""
+        return want[0] if FALLBACK and want[0] and model.get(sid, PRIMARY) != want[0] else None
+
+    def switch(sid, to, then):
+        """Point the session's next request at model `to`; run `then` once the runtime has answered."""
+        rid = f"acp-quiet-model-{next(resume_no)}"
+        with lock:
+            own[rid] = then
+            was, model[sid] = model.get(sid, PRIMARY), to
+        note(f"acp-quiet: session {sid}: model {was} -> {to}")
+        try:
+            to_child(line_of({"jsonrpc": "2.0", "id": rid, "method": "session/set_config_option",
+                              "params": {"sessionId": sid, "configId": "model", "value": to}}))
+        except (OSError, ValueError):
+            note("acp-quiet: could not switch the model: the runtime has exited")
+
+    def emit(lines):
+        with out_lock:
+            for l in lines:
+                out.write(l)
+            out.flush()
+
+    def to_child(line: bytes):
+        with in_lock:
+            child.stdin.write(line); child.stdin.flush()
+
+    def resume(orig, why):
+        with lock:
+            p = paused.get(orig)
+            if p is None or not p["waiting"]:  # cancelled while waiting
+                return
+            p["waiting"] = False
+            rid = f"acp-quiet-resume-{orig}-{next(resume_no)}"  # unique, even when a turn is woken twice
+            resumes[rid] = orig
+            mins = max(1, round((time.time() - p["since"]) / 60))
+            sid = p["session"]
+            to = target_for(sid)
+        text = RESUME_TEXT.format(why=why, mins=f"{mins} minute" + ("s" if mins != 1 else ""))
+
+        def go():
+            note(f"acp-quiet: resuming turn {orig} after {mins} min ({why})" + (f" on {to}" if to else ""))
+            try:
+                to_child(line_of({"jsonrpc": "2.0", "id": rid, "method": "session/prompt",
+                                  "params": {"sessionId": sid, "prompt": [{"type": "text", "text": text}]}}))
+            except (OSError, ValueError):  # the runtime has gone; its exit ends the filter
+                note(f"acp-quiet: could not resume turn {orig}: the runtime has exited")
+        switch(sid, to, go) if to else go()
+
+    def upstream():  # Band -> runtime, unchanged; remember which requests start a turn
+        for line in sys.stdin.buffer:
+            try:
+                m = json.loads(line)
+            except ValueError:
+                m = {}
+            if m.get("method") == "session/prompt":
+                sid = (m.get("params") or {}).get("sessionId")
+                said = " ".join(str(b.get("text", "")) for b in (m.get("params") or {}).get("prompt") or [] if isinstance(b, dict))
+                inc = INCOMING.search(said) if FOLD else None
+                if inc and inc["msg"] in folded:  # already delivered inside an earlier turn
+                    note(f"acp-quiet: settled at once, without the model: message {inc['msg'][:8]} from {inc['frm']} "
+                         f"was delivered inside an earlier turn")
+                    emit([line_of({"jsonrpc": "2.0", "id": m.get("id"), "result": {"stopReason": "end_turn"}})])
+                    turn_end[0] = time.time()
+                    continue
+                if inc and inc["kind"] == "Agent" and time.time() - turn_end[0] <= QUEUED_WITHIN:
+                    extra, ids = fold_waiting(inc["room"], inc["msg"])
+                    if extra:
+                        m["params"]["prompt"].append({"type": "text", "text": extra})
+                        line = line_of(m)
+                        folded.update(ids)
+                if inc:
+                    delivered.add(inc["msg"])
+                with lock:
+                    prompts[m.get("id")] = sid
+                    acted[sid] = False
+                    if FROM_HUMAN.search(said):
+                        human.add(m.get("id"))
+                    to = target_for(sid)
+                if to:  # a new turn starts on the model the seat should be on now
+                    done = threading.Event()
+                    switch(sid, to, done.set)
+                    done.wait(30)
+            elif m.get("method") == "session/set_config_option" and (m.get("params") or {}).get("configId") == "model":
+                sid, value = m["params"].get("sessionId"), m["params"].get("value")
+                with lock:
+                    model[sid] = value
+                    if value not in (PRIMARY, FALLBACK) and want[0]:
+                        want[0] = None  # a model chosen in Band, not in the mandate: leave the choice alone
+                        note(f"acp-quiet: Band set model {value}; model switching is off for this runtime")
+            elif m.get("method") == "session/cancel":
+                sid = (m.get("params") or {}).get("sessionId")
+                with lock:
+                    gone = [o for o, p in paused.items() if p["session"] == sid and p["waiting"]]
+                    for o in gone:
+                        paused.pop(o)["timer"].cancel()
+                        prompts.pop(o, None)
+                for o in gone:  # the paused turn ends here, as the runtime would end a cancelled one
+                    note(f"acp-quiet: turn {o} cancelled while paused")
+                    emit([line_of({"jsonrpc": "2.0", "id": o, "result": {"stopReason": "cancelled"}})])
+            to_child(line)
+        with in_lock:
+            child.stdin.close()
+
+    def kick(to=None, quiet_needed=QUIET_BEFORE_KICK, only=None):
+        """Cancel every turn in progress that has gone quiet (only session `only`'s, when given);
+        each is resumed when its cancel lands, on model `to` when one is given. A turn paused
+        after a failure resumes now."""
+        with lock:
+            if to and want[0]:
+                want[0] = to
+            waiting = [(o, p["why"]) for o, p in paused.items() if p["waiting"] and (only is None or p["session"] == only)]
+            for o, _ in waiting:
+                paused[o]["timer"].cancel()
+        for o, why in waiting:
+            resume(o, why)
+        quiet = time.time() - last_out[0]
+        quiet_for[0] = quiet
+        if quiet < quiet_needed:
+            note(f"acp-quiet: wake signal ignored: the runtime spoke {quiet:.0f} s ago"
+                 + (f"; its next request goes to {want[0]}" if to and FALLBACK and want[0] else "")); return
+        with lock:
+            turns = [(o, sid) for o, sid in prompts.items()
+                     if not paused.get(o, {}).get("waiting") and o not in kicked and (only is None or sid == only)]
+            kicked.update(o for o, _ in turns)
+        for o, sid in turns:
+            note(f"acp-quiet: waking turn {o}: quiet for {quiet / 60:.0f} min, cancelling its wait to resume it")
+            try:
+                to_child(line_of({"jsonrpc": "2.0", "method": "session/cancel", "params": {"sessionId": sid}}))
+            except (OSError, ValueError):
+                pass
+
+    # A signal handler must not take the locks the reading loop holds; hand the work to a thread.
+    # SIGUSR1: the seat's own model answers again. SIGUSR2 (only with a second model): the seat's
+    # model still refuses and the second one answers.
+    signal.signal(signal.SIGUSR1, lambda *_: threading.Thread(target=kick, args=(PRIMARY if FALLBACK else None,), daemon=True).start())
+    if FALLBACK:
+        signal.signal(signal.SIGUSR2, lambda *_: threading.Thread(target=kick, args=(FALLBACK, SWITCH_QUIET), daemon=True).start())
+    def watch_log():
+        """Move a turn whose request was just refused on the seat's own model to the second one."""
+        try:
+            pos = os.path.getsize(RUNTIME_LOG)  # from the filter's start: earlier lines are history
+        except OSError:
+            pos = None
+        while True:
+            time.sleep(5)
+            try:
+                size = os.path.getsize(RUNTIME_LOG)
+            except OSError:
+                continue
+            if pos is None or size < pos:  # the log appeared, or a new log started: read it from its start
+                pos = 0
+            if size == pos:
+                continue
+            try:
+                with open(RUNTIME_LOG, errors="replace") as f:
+                    f.seek(pos)
+                    chunk = f.read()
+                    pos = f.tell()
+            except OSError:
+                continue
+            for line in chunk.splitlines():
+                if 'message="stream error"' not in line or "small=true" in line or not REFUSED_LINE.search(line):
+                    continue
+                m = re.search(r"providerID=(\S+) modelID=(\S+).*?session\.id=(\S+)", line)
+                if not m:
+                    continue
+                refused, sid = f"{m.group(1)}/{m.group(2)}", m.group(3)
+                with lock:
+                    active = sid in prompts.values() and not any(p["session"] == sid and p["waiting"] for p in paused.values())
+                    cur = model.get(sid, PRIMARY)
+                if active and want[0] and cur == refused and refused != FALLBACK:
+                    note(f"acp-quiet: {refused} refused a request of session {sid}; moving the turn to {FALLBACK}")
+                    threading.Thread(target=move_when_quiet, args=(sid,), daemon=True).start()
+
+    def move_when_quiet(sid):
+        """Cancel and resume on the second model once the runtime has gone quiet (it retries first)."""
+        for _ in range(24):  # up to two minutes: the runtime's own retries of a refused request
+            with lock:
+                active = sid in prompts.values()
+                done = model.get(sid, PRIMARY) == FALLBACK or any(o in kicked for o, v in prompts.items() if v == sid)
+            if not active or done:
+                return
+            if time.time() - last_out[0] >= 10:
+                kick(FALLBACK, 10, only=sid)
+                return
+            time.sleep(5)
+
+    if FALLBACK and RUNTIME_LOG:
+        threading.Thread(target=watch_log, daemon=True).start()
+    threading.Thread(target=upstream, daemon=True).start()
+    held = []
+    sent = [False]  # this turn posted a room message through the band CLI
+    sending, unsent = set(), set()  # this turn's tool calls whose own command is a band/jam send; those that failed
+
+    for line in child.stdout:
+        last_out[0] = time.time()
+        try:
+            m = json.loads(line)
+        except ValueError:
+            emit(held + [line]); held = []; continue
+        if "id" in m and "method" not in m and m["id"] in own:  # the answer to this filter's model switch
+            with lock:
+                then = own.pop(m["id"])
+            if "error" in m:
+                note(f"acp-quiet: the runtime refused the model switch: {json.dumps(m['error'])[:200]}")
+            threading.Thread(target=then, daemon=True).start()
+            continue
+        kind = ((m.get("params") or {}).get("update") or {}).get("sessionUpdate") if m.get("method") == "session/update" else None
+        if kind == "config_option_update" and own:
+            continue  # the runtime announcing this filter's switch: Band keeps the seat's configured model
+        if kind == "agent_message_chunk":
+            held.append(line); continue
+        if kind in FLUSH_ON:
+            acted[(m.get("params") or {}).get("sessionId")] = True
+            # Only the command the seat ran counts, not its output (a room read quotes other seats' send
+            # commands), and not a send that failed.
+            upd = m["params"]["update"]; tid = upd.get("toolCallId")
+            if upd.get("status") == "failed":
+                unsent.add(tid)
+            if tid not in unsent and SENT_RE.search(json.dumps([upd.get("rawInput"), upd.get("title")]).encode()):
+                sending.add(tid)
+            sending.difference_update(unsent)
+            sent[0] = bool(sending)
+            if held and is_compaction_summary(held_text(held)):
+                note(f"acp-quiet: withheld the runtime's compaction summary ({len(held_text(held))} characters)")
+                held = []
+            if held and is_pre_tool_narration(held_text(held)):
+                note(f"acp-quiet: posted a narration line as a thought ({held_text(held).strip()[:40]!r})")
+                held = [as_thought(l) for l in held]
+            emit(held + [line]); held = []; continue
+        nudge = None
+        with lock:
+            orig = None
+            if "id" in m and "method" not in m:
+                orig = resumes.pop(m["id"]) if m["id"] in resumes else (m["id"] if m["id"] in prompts else None)
+            failed = failure_kind(m["error"]) if orig is not None and "error" in m else None
+            if orig in kicked:
+                # The answer to our own cancel (the runtime reports it as an ordinary end of turn,
+                # not as "cancelled"): resume now, not after a pause.
+                kicked.discard(orig)
+                failed = "woken"
+            sess = prompts.get(orig)
+            if failed == "rate" and FALLBACK and want[0] and model.get(sess, PRIMARY) != FALLBACK:
+                want[0] = FALLBACK  # carry on with the second model at once instead of waiting
+                failed = "switch"
+            p = paused.get(orig) if failed else None
+            tries = 0 if failed is None else (p["tries"] if p else 0)
+            pauses = [0] if failed in ("woken", "switch") else PAUSES.get(failed or "", [])
+            if failed in ("woken", "switch"):
+                tries = 0  # a wake or a switch is not a failed attempt
+            if failed and tries < len(pauses):
+                # Hold the turn open: Band keeps waiting, the closing text keeps being held.
+                wait = pauses[tries] * random.uniform(1.0, 1.15)  # seats sharing a model spread out
+                since = p["since"] if p else (time.time() - quiet_for[0] if failed == "woken" else time.time())
+                why = {"rate": "rate limit", "switch": "rate limit", "gateway": "gateway timeout",
+                       "network": "no network connection"}.get(failed, "usage limit")
+                cur, to = model.get(sess, PRIMARY), target_for(sess)
+                t = threading.Timer(wait, resume, (orig, why)); t.daemon = True
+                paused[orig] = {"session": sess, "tries": tries + 1, "since": since, "timer": t, "waiting": True, "why": why}
+                t.start()
+            else:
+                failed = None
+                closing = held_text(held)
+                if (orig is not None and "error" not in m and orig in human and orig not in nudged and not acted.get(sess)
+                        and (not closing.strip() or is_silence(closing) or is_intent_only(closing))):
+                    nudged.add(orig); nudge = f"acp-quiet-nudge-{orig}-{next(resume_no)}"; resumes[nudge] = orig
+                elif orig is not None:
+                    prompts.pop(orig, None); paused.pop(orig, None); human.discard(orig)
+        if nudge:
+            # Not a reply: send the turn back once, in the same session, instead of settling it.
+            note(f"acp-quiet: turn {orig} answered the human's message with {closing.strip()[:40]!r} and no action; sending it back once")
+            try:
+                to_child(line_of({"jsonrpc": "2.0", "id": nudge, "method": "session/prompt",
+                                  "params": {"sessionId": sess, "prompt": [{"type": "text", "text": NUDGE_TEXT}]}}))
+            except (OSError, ValueError):
+                note(f"acp-quiet: could not send turn {orig} back: the runtime has exited")
+            held = []
+            continue
+        if failed:
+            at = time.strftime("%H:%M UTC", time.gmtime(time.time() + wait))
+            note(f"acp-quiet: turn {orig} woken after {quiet_for[0] / 60:.0f} quiet min; resuming it now" if failed == "woken" else
+                 f"acp-quiet: turn {orig} failed on a {why} on {cur}; resuming it now on {to}" if failed == "switch" else
+                 f"acp-quiet: turn {orig} failed on a {why}; pause {tries + 1}/{len(pauses)}, resuming about {at}")
+            # Text before the failed request is not the turn's closing text (the turn goes on),
+            # and a paused turn may be cancelled: release it now rather than let it reach a later turn.
+            text = (f"Carrying on with {to}: the model service refused this seat's request on {cur} ({why}). "
+                    f"Same session; nothing is lost." if failed == "switch" else
+                    f"Resumed on {to}: {cur} is still refusing this seat's requests ({why}); the seat goes back "
+                    f"to it once it answers. Nothing is lost." if failed == "woken" and to and to == FALLBACK else
+                    f"Resumed on {to}, which is answering again; nothing is lost." if failed == "woken" and to else
+                    f"Resumed: the model service is answering again after refusing this seat's requests "
+                    f"({why}); nothing is lost." if failed == "woken" else
+                    f"Paused: this machine lost its network connection. "
+                    f"This turn resumes on its own about {at}; nothing is lost." if failed == "network" else
+                    f"Paused: the model service refused this seat's request ({why}). "
+                    f"This turn resumes on its own about {at}; nothing is lost.")
+            emit(held + [line_of({"jsonrpc": "2.0", "method": "session/update", "params": {
+                "sessionId": sess, "update": {"sessionUpdate": "agent_thought_chunk", "content": {
+                    "type": "text", "text": text}}}})])
+            held = []
+            continue
+        if orig is not None and m["id"] != orig:  # a resumed turn answers Band's original request
+            m["id"] = orig
+            line = line_of(m)
+        if orig is not None:
+            text = held_text(held)
+            if held and is_compaction_summary(text):
+                note(f"acp-quiet: settled a turn silently: its closing text was the runtime's compaction summary ({len(text)} characters, withheld)")
+                held = []
+            elif held and is_silence(text):
+                note(f"acp-quiet: settled a turn silently (dropped {text.strip()[:40]!r})")
+                held = []
+            elif held and is_intent_only(text):
+                note(f"acp-quiet: settled a turn silently: its closing text only announced a next step (dropped {text.strip()[:40]!r})")
+                held = []
+            elif held and sent[0] and (len(text.strip()) <= RECEIPT_MAX or opens_as_receipt(text) or ends_silent(text)) and not is_garbled(text):
+                note(f"acp-quiet: settled a turn silently after its message was sent (dropped {text.strip()[:40]!r})")
+                held = []
+            elif held and sent[0] and not is_garbled(text):
+                note(f"acp-quiet: posted a closing report as a thought: the turn's message was already sent "
+                     f"({len(text)} characters, {text.strip()[:40]!r})")
+                held = [as_thought(l) for l in held]
+            elif held and opens_silent(text) and not is_garbled(text):
+                note(f"acp-quiet: posted a closing text that opens by declaring silence as a thought "
+                     f"({len(text)} characters, {text.strip()[:40]!r})")
+                held = [as_thought(l) for l in held]
+            elif held and is_garbled(text):
+                note(f"acp-quiet: withheld {len(text)} characters of unreadable text")
+                notice = json.loads(held[0])
+                notice["params"]["update"]["content"] = {"type": "text", "text": GARBLED_NOTICE}
+                held = [(json.dumps(notice) + "\n").encode()]
+            emit(held + [line]); held = []; sent[0] = False; sending.clear(); unsent.clear(); turn_end[0] = time.time(); continue
+        emit([line])  # thoughts, plans, usage: pass through, keep holding the closing text
+    emit(held)
+    sys.exit(child.wait())
+
+
+if __name__ == "__main__":
+    main()

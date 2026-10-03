@@ -1,0 +1,61 @@
+#!/usr/bin/env bash
+# Keeps the machine on the network while a run is going: when Band has been unreachable for two
+# minutes and the Wi-Fi is not connected, ask NetworkManager to rejoin the Wi-Fi it was last on.
+#
+#   bin/net-watch            (bin/resume-host starts it as the user unit band-net-watch)
+#
+# Why: when a Wi-Fi network (a phone hotspot, say) drops out, NetworkManager's reconnect can end
+# in a password prompt; if nobody answers it in two minutes it stops trying, and the machine stays
+# offline even after the network is back. Rejoining a saved network by hand clears that.
+# It changes no setting. It leaves networking alone when Wi-Fi or networking was switched off by
+# hand, and when the Wi-Fi is connected but the internet is not (rejoining cannot help then).
+# Log: logs/net-watch.log, one line per change of state.
+set -uo pipefail
+HERE=$(cd "$(dirname "$0")/.." && pwd)
+LOG=$HERE/logs/net-watch.log
+INTERVAL=${NET_WATCH_INTERVAL:-30}
+GRACE=${NET_WATCH_GRACE:-120}
+PROBE=${NET_WATCH_URL:-https://app.band.ai/}
+
+last=
+say() { [[ $* == "$last" ]] && return; last=$*; echo "$(date -u +%FT%TZ) $*" >> "$LOG"; }
+online() { curl -s -o /dev/null -m 8 "$PROBE"; }
+wifi_connected() { nmcli -t -f TYPE,STATE device 2>/dev/null | grep -qx 'wifi:connected'; }
+active_wifi() { nmcli -t -f TYPE,NAME connection show --active 2>/dev/null | sed -n 's/^802-11-wireless://p' | head -1 | sed 's/\\:/:/g'; }
+newest_wifi() {
+  nmcli -t -f TIMESTAMP,TYPE,NAME connection show 2>/dev/null | sed -n 's/^\([0-9]*\):802-11-wireless:/\1 /p' \
+    | sort -nr | head -1 | cut -d' ' -f2- | sed 's/\\:/:/g'
+}
+
+known=$(active_wifi); down_since=
+say "watching (probe $PROBE every ${INTERVAL}s; rejoin after ${GRACE}s offline; Wi-Fi now: ${known:-none})"
+while true; do
+  if online; then
+    if [[ -n $down_since ]]; then say "back online after $(( $(date +%s) - down_since )) s"; down_since=; fi
+    k=$(active_wifi); [[ -n $k ]] && known=$k
+    say "online${known:+ on \"$known\"}"
+  else
+    now=$(date +%s)
+    if [[ -z $down_since ]]; then down_since=$now; say "offline"; fi
+    if (( now - down_since >= GRACE )); then
+      if [[ $(nmcli -t networking 2>/dev/null) != enabled || $(nmcli -t radio wifi 2>/dev/null) != enabled ]]; then
+        say "offline; networking or Wi-Fi is switched off by hand, so leaving it"
+      elif wifi_connected; then
+        say "offline; the Wi-Fi is connected but $PROBE does not answer, so rejoining would not help"
+      else
+        target=${known:-$(newest_wifi)}
+        if [[ -z $target ]]; then
+          say "offline; no saved Wi-Fi to rejoin"
+        else
+          nmcli device wifi rescan >/dev/null 2>&1
+          if out=$(timeout 60 nmcli --wait 45 connection up id "$target" 2>&1); then
+            say "rejoined \"$target\""
+          else
+            say "offline; could not rejoin \"$target\": $(tr '\n' ' ' <<<"$out" | cut -c1-200)"
+          fi
+        fi
+      fi
+    fi
+  fi
+  sleep "$INTERVAL"
+done

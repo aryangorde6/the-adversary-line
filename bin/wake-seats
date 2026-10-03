@@ -1,0 +1,193 @@
+#!/usr/bin/env python3
+"""Wakes seats whose model has come back after a usage limit, and moves seats to their second
+model while their own is capped.
+
+When the free gateway caps a model it says to retry in about ten hours; the runtime obeys and
+waits inside the turn, although the model is usually back within four. This watchdog runs
+outside the jails. Every few minutes it reads each seat's own runtime log; a seat whose last
+model request was refused for a rate or usage limit, and which has been quiet since, is asleep.
+It then asks that model for a one-word reply; if the model answers, it sends the seat's filter
+(bin/acp-quiet) SIGUSR1, and the filter cancels the wait and resumes the turn in the same
+session. A seat that is working, or waiting on a long command, is never touched: its log does
+not end in a refused request, and the filter itself ignores a wake while the runtime is active.
+
+A seat whose mandate names a second model (`Fallback model:`, on a separate quota) is not left
+asleep: when its own model still refuses and the second answers, the filter gets SIGUSR2 and
+resumes the turn on the second model. While a seat runs on its second model, its own model is
+asked every --back-every seconds; once it answers, SIGUSR1 sends the seat back at its next turn.
+One request getting through does not mean a cap has lifted: a probe once answered while four
+resumed seats were refused two seconds later. So a seat just refused on one model tries the
+other first, and each time a seat sent back is refused again, the wait before the next try
+doubles (up to eight times --back-every).
+
+usage: wake-seats [--every 300] [--quiet-min 10] [--switch-min 3] [--back-every 900] [--once]
+       (log: logs/wake-seats.log)
+"""
+import argparse, calendar, os, pathlib, re, signal, subprocess, sys, time
+
+HERE = pathlib.Path(__file__).resolve().parent
+SEATS = pathlib.Path.home() / ".local/share/opencode-seats"
+LOG = HERE.parent / "logs/wake-seats.log"
+REFUSED = re.compile(r"rate limit|too many requests|freeusagelimit|usage limit|statuscode.?429", re.I)
+ACTIVE = re.compile(r'message=(?:"llm runtime selected"|process|loop|stream providerID)|message="stream error"')
+TS = re.compile(r"timestamp=(\S+?)(?:\.\d+)?Z")
+REQUEST = re.compile(r"message=stream providerID=(\S+) modelID=(\S+).* small=false")
+asked_back = {}  # model -> when it was last asked whether it answers again (for seats on their second model)
+told_back = {}   # filter pid -> (the model it was sent back to, when)
+false_backs = {} # model -> times in a row a seat sent back to it was refused again (each doubles the wait)
+
+
+def say(msg):
+    line = f"{time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime())} {msg}"
+    print(line, flush=True)
+    with open(LOG, "a") as f:
+        f.write(line + "\n")
+
+
+def read_log(seat):
+    """(last model event, provider/model of the last request) from the seat's runtime log."""
+    log = SEATS / seat / "share/log/opencode.log"
+    last = current = None
+    if log.exists():
+        with open(log, errors="replace") as f:
+            for line in f:
+                # The runtime's side requests (titling a session) run beside the turn: their
+                # refusal says nothing about whether the turn itself is stuck.
+                if ACTIVE.search(line) and "small=true" not in line:
+                    last = line
+                r = REQUEST.search(line)
+                if r:
+                    current = f"{r.group(1)}/{r.group(2)}"
+    return last, current
+
+
+def quiet_mins(last):
+    """Minutes since the seat's last model event (None without one)."""
+    m = TS.search(last or "")
+    return (time.time() - calendar.timegm(time.strptime(m.group(1), "%Y-%m-%dT%H:%M:%S"))) / 60 if m else None
+
+
+def asleep(last, quiet_min):
+    """(provider/model, minutes asleep) if the seat's last model event is a refused request."""
+    if not last or "stream error" not in last or not REFUSED.search(last):
+        return None
+    p, mins = re.search(r"providerID=(\S+) modelID=(\S+)", last), quiet_mins(last)
+    if not p or mins is None:
+        return None
+    return (f"{p.group(1)}/{p.group(2)}", mins) if mins >= quiet_min else None
+
+
+def filter_of(seat):
+    """(host pid, environment) of the seat's acp-quiet (its jail has its own process space; the host sees it)."""
+    for d in pathlib.Path("/proc").iterdir():
+        if not d.name.isdigit():
+            continue
+        try:
+            cmd = (d / "cmdline").read_bytes().split(b"\0")
+            env = (d / "environ").read_bytes().split(b"\0")
+        except OSError:
+            continue
+        if len(cmd) > 1 and cmd[1].endswith(b".seat-bin/acp-quiet") and f"SEAT_NAME={seat}".encode() in env:
+            return int(d.name), dict(e.decode(errors="replace").split("=", 1) for e in env if b"=" in e)
+    return None, {}
+
+
+def handles(pid, sig):
+    """True if the process catches `sig`. A filter started before a signal was given a meaning
+    does not, and for it the signal's default action would end the filter and the seat's runtime."""
+    try:
+        caught = next(l.split()[1] for l in open(f"/proc/{pid}/status") if l.startswith("SigCgt:"))
+    except (OSError, StopIteration):
+        return False
+    return bool(int(caught, 16) >> (sig - 1) & 1)
+
+
+def model_answers(model, seat):
+    """One short request through the seat's own runtime configuration, outside any turn."""
+    conf = dict(line.split("=", 1) for line in (HERE / "seat.conf").read_text().splitlines() if "=" in line and not line.startswith("#"))
+    probe = HERE.parent / "run/wake-probe"
+    for d in ("config", "data", "state"):
+        (probe / d).mkdir(parents=True, exist_ok=True)
+    env = dict(os.environ, XDG_CONFIG_HOME=str(probe / "config"), XDG_DATA_HOME=str(probe / "data"),
+               XDG_STATE_HOME=str(probe / "state"), OPENCODE_CONFIG=str(HERE.parent / f"run/opencode-{seat}.json"))
+    try:  # a model still capped makes the runtime wait for hours: the timeout ends the probe
+        out = subprocess.run([f"{conf['OC_BIN']}/opencode", "run", "-m", model, "Reply with exactly the word OK."],
+                             cwd=probe, env=env, capture_output=True, text=True, timeout=120).stdout
+    except subprocess.TimeoutExpired:
+        return False
+    return "OK" in out.upper()
+
+
+def main():
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--every", type=int, default=300)
+    ap.add_argument("--quiet-min", type=float, default=10)
+    ap.add_argument("--switch-min", type=float, default=3, help="quiet minutes before a seat with a second model is moved to it")
+    ap.add_argument("--back-every", type=int, default=900, help="seconds between asks whether a seat's own model is back")
+    ap.add_argument("--once", action="store_true")
+    a = ap.parse_args()
+    LOG.parent.mkdir(exist_ok=True)
+    def back_wait(model):
+        return a.back_every * 2 ** false_backs.get(model, 0)
+
+    while True:
+        answered, due = {}, {}
+
+        def answers(model, seat):
+            if model not in answered:
+                answered[model] = model_answers(model, seat)
+            return answered[model]
+
+        for d in sorted(SEATS.iterdir()) if SEATS.exists() else []:
+            seat = d.name
+            pid, env = filter_of(seat)
+            if pid is None:
+                continue  # no live runtime: Band starts a fresh one on the next mention
+            own, second = env.get("ACP_QUIET_MODEL") or None, env.get("ACP_QUIET_FALLBACK") or None
+            two = bool(own and second and second != own and handles(pid, signal.SIGUSR2))
+            last, current = read_log(seat)
+            s = asleep(last, a.switch_min if two else a.quiet_min)
+            if s:
+                model, mins = s
+                if not handles(pid, signal.SIGUSR1):
+                    say(f"{seat}: asleep {mins:.0f} min on {model}, but its filter predates the wake signal; restart the seat to wake it")
+                    continue
+                back = told_back.pop(pid, None)
+                if back and back[0] == model and time.time() - back[1] < 1800:
+                    false_backs[model] = min(false_backs.get(model, 0) + 1, 3)
+                    say(f"{seat}: sent back to {model} and refused again; next try in {back_wait(model) // 60} min")
+                order = [second if model == own else own, model] if two else [model]
+                for m in order:
+                    if answers(m, seat):
+                        os.kill(pid, signal.SIGUSR2 if two and m == second else signal.SIGUSR1)
+                        say(f"{seat}: asleep {mins:.0f} min on a refused {model} request; {m} answers -> "
+                            + (f"woke it (pid {pid})" if m == model else f"moved it to {m} (pid {pid})"))
+                        break
+                else:
+                    say(f"{seat}: asleep {mins:.0f} min on {model}; still refused, checking again in {a.every // 60} min")
+            elif two and current == second and pid not in told_back and (quiet_mins(last) or 0) < 5:
+                # Working on its second model: ask now and then whether its own model is back. Only
+                # while the seat is visibly active, so the signal never interrupts a long command:
+                # the filter then just sends the seat's next turn to its own model.
+                if own not in due:
+                    due[own] = time.time() - asked_back.get(own, 0) >= back_wait(own)
+                    if due[own]:
+                        asked_back[own] = time.time()
+                if due[own] and answers(own, seat):
+                    os.kill(pid, signal.SIGUSR1)
+                    told_back[pid] = (own, time.time())
+                    say(f"{seat}: working on {second}; {own} answers again -> its next turn goes back to {own} (pid {pid})")
+            elif two and current == own and pid in told_back and time.time() - told_back[pid][1] >= 1200:
+                told_back.pop(pid)
+                false_backs.pop(own, None)  # the way back held
+        if a.once:
+            return
+        # Wait by the wall clock in short steps: a plain sleep does not count time the laptop spent
+        # suspended, so the first check after a resume came up to a full interval late.
+        until = time.time() + a.every
+        while time.time() < until:
+            time.sleep(min(30, max(0.0, until - time.time())))
+
+
+if __name__ == "__main__":
+    main()

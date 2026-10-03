@@ -1,0 +1,146 @@
+#!/usr/bin/env python3
+"""Measured model spend and time, per seat, from the seats' own runtime records.
+
+Seats run OpenCode; every assistant turn is stored with its token counts and cost in
+OpenCode's local database. Band maps each seat to its sessions (`band status`). This joins
+the two and prints one row per seat, plus a total, optionally limited to a time window.
+
+usage: meter [--since ISO8601] [--until ISO8601] [--json [--spans]] seat [seat ...]
+
+busy min is the time the seat spent working on its replies (each reply's start to its completion,
+the model and the tools it ran);
+span min is its first request to its last. --spans adds each reply's [start, end] in ms to the JSON,
+so time with any seat working can be measured across seats. Time the host was suspended is cut out of
+every span (a reply in flight across a suspend is stamped as if the seat worked through it).
+"""
+import argparse, datetime as dt, json, pathlib, re, sqlite3, subprocess, sys
+
+DB = pathlib.Path.home() / ".local/share/opencode/opencode.db"
+
+
+def sessions_for(seat: str) -> list[str]:
+    out = subprocess.run(["band", "status", "--session", f"df-{seat}"],
+                         capture_output=True, text=True).stdout
+    return sorted(set(re.findall(r"uuid=(ses_[A-Za-z0-9]+)", out)))
+
+
+def ms(iso: str | None) -> int | None:
+    return int(dt.datetime.fromisoformat(iso.replace("Z", "+00:00")).timestamp() * 1000) if iso else None
+
+
+SEATS_DIR = pathlib.Path.home() / ".local/share/opencode-seats"
+
+
+def sources(seat, shared):
+    """(db, session ids) pairs for a seat: its own database if it has one (every session in it
+    is the seat's), else the shared database limited to the sessions Band maps to the seat."""
+    own = SEATS_DIR / seat / "share/opencode.db"
+    if own.exists():
+        db = sqlite3.connect(f"file:{own}?mode=ro", uri=True)
+        return [(db, [r[0] for r in db.execute("select id from session")])]
+    return [(shared, sessions_for(seat))]
+
+
+def asleep(since=None):
+    """[start, end] ms of each suspend of the host, from the kernel's "PM: suspend entry/exit" journal lines."""
+    cmd = ["journalctl", "-o", "json", "--no-pager", "_TRANSPORT=kernel", "-g", "PM: suspend (entry|exit)"]
+    if since:  # a suspend that began before the window can still end inside it
+        cmd += ["--since", f"@{since // 1000 - 7 * 86400}"]
+    out, spans, start = subprocess.run(cmd, capture_output=True, text=True).stdout, [], None
+    for line in out.splitlines():
+        e = json.loads(line)
+        t = int(e["__REALTIME_TIMESTAMP"]) // 1000
+        if "entry" in str(e.get("MESSAGE")):
+            start = t
+        elif start is not None:
+            spans.append([start, t]); start = None
+    return spans
+
+
+def awake(spans, sleeps):
+    """The spans with the sleeps cut out of them."""
+    for sb, se in sleeps:
+        spans = [q for b, e in spans for q in ([b, min(e, sb)], [max(b, se), e]) if q[0] <= q[1]]
+    return spans
+
+
+def overlap_min(b, e, spans):
+    """Minutes of [b, e] (ms) covered by the spans."""
+    return sum(max(0, min(e, se) - max(b, sb)) for sb, se in spans) / 60000
+
+
+def meter(seat, db, since, until, sleeps=()):
+    row = {"seat": seat, "models": set(), "turns": 0, "input": 0, "output": 0, "reasoning": 0,
+           "cache_read": 0, "cache_write": 0, "cost_usd": 0.0, "first": None, "last": None, "spans": []}
+    for sdb, sids in sources(seat, db):
+      for sid in sids:
+        for (data,) in sdb.execute("select data from message where session_id=?", (sid,)):
+            m = json.loads(data)
+            if m.get("role") != "assistant":
+                continue
+            t = (m.get("time") or {}).get("created")
+            if (since and t < since) or (until and t > until):
+                continue
+            tok = m.get("tokens") or {}
+            row["turns"] += 1
+            row["models"].add(f"{m.get('providerID')}/{m.get('modelID')}")
+            for k in ("input", "output", "reasoning"):
+                row[k] += tok.get(k, 0)
+            row["cache_read"] += (tok.get("cache") or {}).get("read", 0)
+            row["cache_write"] += (tok.get("cache") or {}).get("write", 0)
+            row["cost_usd"] += m.get("cost") or 0
+            end = (m.get("time") or {}).get("completed") or t
+            row["spans"].append([t, end])
+            row["first"] = min(filter(None, [row["first"], t]))
+            row["last"] = max(filter(None, [row["last"], end]))
+    row["spans"] = awake(row["spans"], sleeps)
+    row["models"] = sorted(row["models"])
+    row["active_min"] = round((row["last"] - row["first"]) / 60000, 1) if row["first"] else 0
+    row["busy_min"] = round(sum(e - b for b, e in row["spans"]) / 60000, 1)
+    return row
+
+
+def main():
+    ap = argparse.ArgumentParser()
+    ap.add_argument("seats", nargs="+")
+    ap.add_argument("--since"); ap.add_argument("--until"); ap.add_argument("--json", action="store_true")
+    ap.add_argument("--spans", action="store_true")
+    a = ap.parse_args()
+    db = sqlite3.connect(f"file:{DB}?mode=ro", uri=True)
+    sleeps = asleep(ms(a.since))
+    rows = [meter(s, db, ms(a.since), ms(a.until), sleeps) for s in a.seats]
+    if a.json:
+        if not a.spans:
+            for r in rows:
+                del r["spans"]
+        json.dump(rows, sys.stdout, indent=1 if not a.spans else None, default=str); print(); return
+    print(f"{'seat':10} {'turns':>5} {'input':>10} {'cached':>11} {'output':>9} {'reason':>8} {'cost $':>7} {'busy min':>8} {'span min':>8}  model")
+    tot = {k: 0 for k in ("turns", "input", "cache_read", "output", "reasoning", "cost_usd")}
+    for r in rows:
+        print(f"{r['seat']:10} {r['turns']:>5} {r['input']:>10,} {r['cache_read']:>11,} {r['output']:>9,} "
+              f"{r['reasoning']:>8,} {r['cost_usd']:>7.2f} {r['busy_min']:>8} {r['active_min']:>8}  {', '.join(r['models'])}")
+        for k in tot:
+            tot[k] += r[k]
+    print(f"{'TOTAL':10} {tot['turns']:>5} {tot['input']:>10,} {tot['cache_read']:>11,} {tot['output']:>9,} "
+          f"{tot['reasoning']:>8,} {tot['cost_usd']:>7.2f}")
+    print(f"at least one seat working: {union_min([sp for r in rows for sp in r['spans']]):.1f} min")
+    if a.since:
+        slept = overlap_min(ms(a.since), ms(a.until) or int(dt.datetime.now().timestamp() * 1000), sleeps)
+        if slept:
+            print(f"host asleep in the window: {slept:.1f} min (cut out of busy min)")
+
+
+def union_min(spans):
+    """Minutes covered by at least one [start, end] span (ms)."""
+    total, cur = 0, None
+    for b, e in sorted(spans):
+        if cur and b <= cur[1]:
+            cur[1] = max(cur[1], e)
+        else:
+            total += (cur[1] - cur[0]) if cur else 0
+            cur = [b, e]
+    return (total + ((cur[1] - cur[0]) if cur else 0)) / 60000
+
+
+if __name__ == "__main__":
+    main()

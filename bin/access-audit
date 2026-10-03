@@ -1,0 +1,57 @@
+#!/usr/bin/env python3
+"""Every tool call a seat made that touched the supplied check files, from the seats' own
+runtime records. The runtime refuses these (see seat.jail); this shows what was tried, what was
+refused, and anything that got through (a search whose rule matches its pattern, not its path).
+
+usage: access-audit [--since ISO8601] [--db PATH] seat [seat ...]
+       --db reads one runtime database for every name given (records from before per-seat databases)
+"""
+import argparse, datetime as dt, json, pathlib, re, sqlite3
+
+HERE = pathlib.Path(__file__).resolve().parent
+conf = dict(l.split("=", 1) for l in (HERE / "seat.conf").read_text().splitlines() if "=" in l and not l.startswith("#"))
+KICKOFF = pathlib.Path(conf["KICKOFF"])
+CHECKS = [f"{t.parent.name}/test" for t in sorted(KICKOFF.glob("*/test")) if t.is_dir()]
+SEATS = pathlib.Path.home() / ".local/share/opencode-seats"
+
+
+def main():
+    ap = argparse.ArgumentParser()
+    ap.add_argument("seats", nargs="+"); ap.add_argument("--since"); ap.add_argument("--db")
+    a = ap.parse_args()
+    since = int(dt.datetime.fromisoformat(a.since.replace("Z", "+00:00")).timestamp() * 1000) if a.since else 0
+    # The folder named, or reached relatively: in the submitted run a seat ran `cd <kickoff>/tablekeeper &&
+    # sed -n … test/stage_2/test_ui.py` and `cd <kickoff>/tablekeeper/test && sed -n … stage_2/test_ui.py`;
+    # the runtime leaves `cd` out of its command rules, and neither command names `tablekeeper/test`.
+    tracks = "|".join(re.escape(c.split("/")[0]) for c in CHECKS) or "(?!)"
+    hit = re.compile("|".join([re.escape(c) for c in CHECKS] + [
+        r"\btest/stage_\d", r"\bstage_\d/test_\w*\.py(?!::)", r"\bconftest\.py",  # a test id (file.py::name) is a result
+        rf"\bcd\s+[^;&|]*{re.escape(KICKOFF.name)}/(?:{tracks})\b[^;|]*?(?:&&|;)[^|]*?(?<![\w/-])test(?:/|\s*(?:$|[;&|]))"]))
+    total = {"refused": 0, "completed": 0}
+    for seat in a.seats:
+        db_path = pathlib.Path(a.db) if a.db else SEATS / seat / "share/opencode.db"
+        if not db_path.exists():
+            print(f"{seat:10} no runtime records"); continue
+        db = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True)
+        n = {"refused": 0, "completed": 0}
+        for t, data in db.execute("select time_created, data from part where time_created >= ? order by time_created", (since,)):
+            p = json.loads(data)
+            if p.get("type") != "tool" or p.get("tool") == "write":  # a message file names them; it reads nothing
+                continue
+            state = p.get("state") or {}
+            args = json.dumps(state.get("input") or {})
+            # A search reaches the check files through its path or, with no path, its directory.
+            if not hit.search(args) and not (p.get("tool") in ("grep", "glob") and hit.search(str(state.get("output", ""))[:4000])):
+                continue
+            kind = "refused" if state.get("status") == "error" else "completed"
+            n[kind] += 1
+            when = dt.datetime.fromtimestamp(t / 1000, dt.UTC).strftime("%H:%M:%S")
+            print(f"  {seat:10} {when} {kind:9} {p.get('tool'):6} {args[:120]}")
+        print(f"{seat:10} refused {n['refused']:>3}   completed {n['completed']:>3}")
+        for k in total:
+            total[k] += n[k]
+    print(f"{'TOTAL':10} refused {total['refused']:>3}   completed {total['completed']:>3}   (check folders: {', '.join(CHECKS)})")
+
+
+if __name__ == "__main__":
+    main()

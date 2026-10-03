@@ -1,0 +1,18 @@
+#!/usr/bin/env bash
+# Stop every seat and make sure no seat runtime survives. `band stop` can report that it could
+# not stop a runtime session, and that runtime then keeps working — writing into a run that was
+# meant to be over. After the stops, any jailed runtime still alive is terminated.
+#   bin/stop-seats
+set -uo pipefail
+HERE=$(cd "$(dirname "$0")/.." && pwd)
+for f in "$HERE"/mandates/*.md; do
+  s=$(basename "$f" .md); printf '%-10s %s\n' "$s" "$(band stop --session "df-$s" 2>&1 | tail -1)"
+done
+sleep 3
+left=$(pgrep -f '[.]seat-bin/acp-quiet|[.]oc-bin/opencode acp')
+if [[ -n $left ]]; then
+  echo "terminating runtimes that outlived the stop: $(tr '\n' ' ' <<< "$left")"
+  kill $left 2>/dev/null; sleep 3; pgrep -f '[.]seat-bin/acp-quiet|[.]oc-bin/opencode acp' | xargs -r kill -9
+fi
+pgrep -f '[.]seat-bin/acp-quiet|[.]oc-bin/opencode acp' >/dev/null && { echo "runtimes still alive" >&2; exit 1; }
+echo "all seats stopped; no seat runtime running"
